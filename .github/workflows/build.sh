@@ -17,4 +17,4 @@ mkdir -p pages
     tail +2 otp
   ) | gzip -9
 ) > pages/install
-cp README.md index.md
+cp README.md pages/index.md
