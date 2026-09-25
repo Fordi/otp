@@ -2,7 +2,7 @@
 # Bash bootstrap.  Installs node, via nvm, if needed.
 TARGET="${TARGET:-${HOME}/.local/opt/otp/otp}"
 # shellcheck disable=SC2207
-FETCH=($(command -v wget && echo "wget -qO-" || echo "curl -sSL"))
+FETCH=($(command -v wget && echo "-qO-" || echo "curl -sSL"))
 if ! NODE="$(command -v node)"; then
   if ! NVM="$(command -v nvm)"; then
     # shellcheck disable=SC2312
