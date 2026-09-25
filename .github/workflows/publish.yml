@@ -63,7 +63,7 @@ jobs:
         uses: actions/upload-pages-artifact@v5
         if: always()
         with:
-          path: coverage/
+          path: pages/
       - name: Deploy installer on GitHub Pages
         uses: actions/deploy-pages@v5
   
