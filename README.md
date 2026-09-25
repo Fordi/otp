@@ -2,14 +2,14 @@
 
 `otp` is a tiny command-line app to store and evaluate OTP codes.
 
-# Installation
+## Installation
 
 `. <(wget -qO- https://fordi.github.io/otp/install | bash)`, or  
 `. <(curl -sSL https://fordi.github.io/otp/install | bash)`
 
-# Usage
+## Usage
 
-```plain
+```text
 usage: otp [([flags] command|{name|url|secret})]...
   flags:
     --clip/-c    toggle clipboard

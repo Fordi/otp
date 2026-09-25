@@ -1,5 +1,6 @@
 #!/usr/bin/bash
 mkdir -p pages
+npx -y --package=markdown-to-html-cli markdown-to-html README.md --output pages
 # shellcheck disable=SC2016
 # shellcheck disable=SC2028
 (
@@ -17,4 +18,3 @@ mkdir -p pages
     tail +2 otp
   ) | gzip -9
 ) > pages/install
-pandoc README.md -f gfm -t html5 -s -o pages/index.html
