@@ -4,8 +4,15 @@
 
 ## Installation
 
-`. <(wget -qO- https://fordi.github.io/otp/install | bash)`, or  
-`. <(curl -sSL https://fordi.github.io/otp/install | bash)`
+```sh
+. <(wget -qO- https://fordi.github.io/otp/install | bash)
+```
+
+or
+
+```sh
+. <(curl -sSL https://fordi.github.io/otp/install | bash)
+```
 
 ## Usage
 
