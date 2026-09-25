@@ -1,10 +1,12 @@
 #!/usr/bin/bash
 # Bash bootstrap.  Installs node, via nvm, if needed.
 TARGET="${TARGET:-${HOME}/.local/opt/otp/otp}"
+# shellcheck disable=SC2207
+FETCH=($(command -v wget && echo "wget -qO-" || echo "curl -sSL"))
 if ! NODE="$(command -v node)"; then
   if ! NVM="$(command -v nvm)"; then
     # shellcheck disable=SC2312
-    wget -qO- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash
+    "${FETCH[@]}" https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash
     NVM_DIR="${HOME}/.nvm"
     echo "NVM_DIR=\"${NVM_DIR}\""
     echo "source \"\${NVM_DIR}/nvm.sh\""
