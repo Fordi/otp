@@ -214,10 +214,11 @@ class SecretManager {
     },
   ) {
     if (XDG_SESSION_TYPE === "tty") {
+      const user = USER ?? (HOME && basename(HOME)) ?? (USERPROFILE && basename(USERPROFILE)) ?? "unknown";
       this.#secretService = new BinarySecret(
         join(HOME, ".local", `${appName}.key`),
-        USER,
-        UID,
+        user,
+        UID ?? 0,
       );
     } else if (DBUS_SESSION_BUS_ADDRESS) {
       this.#secretService = new SecretServiceSecret({ domain: appName });
