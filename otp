@@ -354,7 +354,7 @@ const otp = async (url) => {
 
 const usage = async (level = 0, msg) => {
   const short = level !== 0;
-  const stream = !short ? process.stdout : process.stderr;
+  const stream = process.stderr;
   const randomSecret = fromBase32.random(1);
   const mockUrl = `otpauth://totp/npm:${process.env.USER}?secret=${fromBase32.random(2)}&issuer=npm`;
   stream.write(
