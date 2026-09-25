@@ -1,11 +1,10 @@
-import { readFile, writeFile, chmod, stat, mkdir } from "node:fs/promises";
+import { readFile, writeFile, chmod, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 const { HOME } = process.env;
 const profile = join(HOME, ".profile");
 const INSTALL_PATH = dirname(target);
 const PATH_LINE = `PATH="\${PATH}:${INSTALL_PATH}"`;
-await mkdir(INSTALL_PATH, { recursive: true });
 let rc = [];
 try {
   rc = (await readFile(profile, "utf8")).split("\n");

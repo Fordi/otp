@@ -1,6 +1,7 @@
 #!/usr/bin/bash
 # Bash bootstrap.  Installs node, via nvm, if needed.
 TARGET="${TARGET:-${HOME}/.local/opt/otp/otp}"
+mkdir -p "$(dirname "${TARGET}")"
 # shellcheck disable=SC2207
 FETCH=($(command -v wget && echo "-qO-" || echo "curl -sSL"))
 if ! NODE="$(command -v node)"; then
