@@ -13,6 +13,7 @@ if ! NODE="$(command -v node)"; then
     echo "source \"\${NVM_DIR}/nvm.sh\""
     # shellcheck disable=SC1091
     . "${NVM_DIR}/nvm.sh"
+    NVM=nvm
   fi
   "${NVM}" install --lts stable
   
