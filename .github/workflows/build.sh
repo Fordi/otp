@@ -17,4 +17,4 @@ mkdir -p pages
     tail +2 otp
   ) | gzip -9
 ) > pages/install
-cp README.md pages/index.md
+pandoc README.md -f gfm -t html5 -s -o pages/index.html
