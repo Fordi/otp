@@ -1,0 +1,529 @@
+#!/usr/bin/env node -S --no-warnings=ExperimentalWarning
+import { spawnSync } from "node:child_process";
+import { chmod, readFile, stat, writeFile } from "node:fs/promises";
+import { join, basename } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+
+const encode = TextEncoder.prototype.encode.bind(new TextEncoder());
+const decode = TextDecoder.prototype.decode.bind(new TextDecoder());
+const getRandomValues = crypto.getRandomValues.bind(crypto);
+const { subtle } = crypto;
+
+class SecretServiceSecret {
+  #attributes;
+  #label;
+  constructor(attributes, label) {
+    this.#label = label;
+    this.#attributes = Object.entries(attributes)
+      .map(([key, value]) => {
+        const t = typeof value;
+        if (t === "undefined" || value === null) {
+          return undefined;
+        }
+        if (t !== "string" && t !== "boolean" && t !== "number") {
+          throw new Error("Only scalar attributes are supported");
+        }
+        return [key, String(value)];
+      })
+      .filter((a) => a !== undefined);
+  }
+  async read() {
+    const cp = spawnSync(
+      "secret-tool",
+      ["lookup", ...this.#attributes.flat()],
+      { encoding: "utf8" },
+    );
+    if (cp.status !== 0) {
+      throw Object.assign(
+        new Error(
+          `Couldn't read secret with attributes: \n${this.#attributes.map(([key, value]) => `  ${key}="${value}"`)}`,
+        ),
+        { code: "ENOENT" },
+      );
+    }
+    return new Uint8Array(Buffer.from(cp.stdout, "base64url"));
+  }
+  async write(secret) {
+    const input = Buffer.from(secret).toString("base64url");
+    const cp = spawnSync(
+      "secret-tool",
+      ["store", `--label="${this.#label ?? ""}"`, ...this.#attributes.flat()],
+      { encoding: "utf8", input },
+    );
+    if (cp.status !== 0) {
+      throw new Error(
+        `Couldn't write secret "${this.#label}" with attributes: \n${entries.map(([key, value]) => `  ${key}="${value}"`)}`,
+      );
+    }
+    return;
+  }
+}
+
+class WindowsSecureStringSecret {
+  #path;
+  constructor(path) {
+    this.#path = path;
+  }
+  async read() {
+    const psCommand = [
+      `Import-CliXml -Path ${JSON.stringify(this.#path)}`,
+      "ConvertFrom-SecureString -AsPlainText",
+    ].join(" | ");
+
+    const cp = spawnSync("powershell", ["-NoProfile", `-Command`, psCommand], {
+      encoding: "utf8",
+    });
+    if (cp.status !== 0) {
+      throw Object.assign(new Error(`Couldn't read secret ${this.#path}`), {
+        code: "ENOENT",
+      });
+    }
+    return new Uint8Array(Buffer.from(cp.stdout, "base64url"));
+  }
+  async write(secret) {
+    const input = Buffer.from(secret).toString("base64url");
+    const psCommand = [
+      JSON.stringify(input),
+      "ConvertTo-SecureString -AsPlainText -Force",
+      `Export-CliXml -Path ${JSON.stringify(this.#path)}`,
+    ].join(" | ");
+    const cp = spawnSync("powershell", ["-NoProfile", `-Command`, psCommand], {
+      encoding: "utf8",
+    });
+    if (cp.status !== 0) {
+      throw new Error(`Couldn't write secret "${this.#path}"`);
+    }
+
+    return;
+  }
+}
+
+const encrypt = async (key, bytes) => {
+  const iv = getRandomValues(new Uint8Array(12));
+  return [
+    iv,
+    new Uint8Array(
+      await subtle.encrypt(
+        { name: "AES-GCM", iv },
+        await subtle.importKey("raw", key, "AES-GCM", true, [
+          "encrypt",
+          "decrypt",
+        ]),
+        bytes,
+      ),
+    ),
+  ];
+};
+
+const decrypt = async (key, [iv, encrypted] = []) =>
+  !iv
+    ? undefined
+    : await subtle.decrypt(
+        { name: "AES-GCM", iv },
+        await subtle.importKey("raw", key, "AES-GCM", true, [
+          "encrypt",
+          "decrypt",
+        ]),
+        encrypted,
+      );
+
+const APP_SECRET = "So, I really hate TOTP apps, turns out.";
+const getUserHash = async (user, uid) =>
+  crypto.subtle.digest("SHA-256", encode(`${user}:${uid}:${APP_SECRET}`));
+const toBase64 = (u8) =>
+  u8.toBase64
+    ? u8.toBase64({ omitPadding: true, alphabet: "base64url" })
+    : Buffer.from(u8).toString("base64url");
+
+const fromBase64 = (str) =>
+  Uint8Array.fromBase64
+    ? Uint8Array.fromBase64(str)
+    : new Uint8Array(Buffer.from(str, "base64url"));
+
+class BinarySecret {
+  #file;
+  #user;
+  #uid;
+  constructor(file, user, uid) {
+    this.#file = file;
+    this.#user = user;
+    this.#uid = uid;
+  }
+
+  async read() {
+    const mode = (await stat(this.#file)).mode & 0o777;
+    const [iv, encrypted] = (await readFile(this.#file, "utf8"))
+      .split("/")
+      .map(fromBase64);
+    return await decrypt(await getUserHash(this.#user, this.#uid), [
+      iv,
+      encrypted,
+    ]);
+  }
+
+  async write(secret) {
+    if (typeof secret === "string") {
+      secret = new TextEncoder().encode(secret);
+    }
+    const payload = (
+      await encrypt(await getUserHash(this.#user, this.#uid), secret)
+    )
+      .map(toBase64)
+      .join("/");
+    await writeFile(this.#file, payload, "utf8");
+    await chmod(this.#file, 0o600);
+  }
+}
+
+class SecretManager {
+  #secretService;
+  #file;
+  #open(tableName) {
+    const store = new DatabaseSync(this.#file);
+    store.exec(
+      `CREATE TABLE IF NOT EXISTS store (key TEXT PRIMARY KEY, iv BLOB, encrypted BLOB)`,
+    );
+    const getValueByKey = store.prepare(
+      "SELECT iv, encrypted FROM store WHERE key = ?",
+    );
+    const setValueByKey = store.prepare(
+      "INSERT INTO store (key, iv, encrypted) VALUES(?, ?, ?) ON CONFLICT (key) DO UPDATE SET iv = excluded.iv, encrypted = excluded.encrypted",
+    );
+    const listKeys = store.prepare("SELECT key FROM store ORDER BY key ASC");
+    return {
+      get: (key) => {
+        const { iv, encrypted } = getValueByKey.get(key) ?? {};
+        return iv ? [iv, encrypted] : undefined;
+      },
+      set: (key, [iv, encrypted]) => {
+        setValueByKey.run(key, iv, encrypted);
+      },
+      list: () => listKeys.all(),
+      close: () => store.close(),
+    };
+  }
+  constructor(
+    appName,
+    {
+      XDG_SESSION_TYPE,
+      DBUS_SESSION_BUS_ADDRESS,
+      USER,
+      UID,
+      HOME,
+      USERPROFILE,
+    },
+  ) {
+    if (XDG_SESSION_TYPE === "tty") {
+      this.#secretService = new BinarySecret(
+        join(HOME, ".local", `${appName}.key`),
+        USER,
+        UID,
+      );
+    } else if (DBUS_SESSION_BUS_ADDRESS) {
+      this.#secretService = new SecretServiceSecret({ domain: appName });
+    } else {
+      this.#secretService = WindowsSecureStringSecret(
+        join(USERPROFILE, `${appName}.key`),
+      );
+    }
+    this.#file = join(HOME, `.local/${appName}.store`);
+  }
+  async getSecret() {
+    try {
+      return await this.#secretService.read();
+    } catch (e) {
+      if (e.code === "ENOENT") {
+        const secret = getRandomValues(new Uint8Array(32));
+        await this.#secretService.write(secret);
+        return secret;
+      }
+      throw e;
+    }
+  }
+  async get(name) {
+    const secret = await this.getSecret();
+    const db = this.#open();
+    try {
+      return decode(await decrypt(secret, db.get(name)));
+    } finally {
+      db.close();
+    }
+  }
+  async set(name, value) {
+    const secret = await this.getSecret();
+    const db = this.#open();
+    const [iv, encrypted] = await encrypt(secret, encode(value));
+    try {
+      return db.set(name, [iv, encrypted]);
+    } finally {
+      db.close();
+    }
+  }
+
+  async list() {
+    const db = this.#open();
+    try {
+      return db.list().map(({ key }) => key);
+    } finally {
+      db.close();
+    }
+  }
+}
+
+const fromBase32 = Object.assign(
+  (str) =>
+    str &&
+    new Uint8Array(
+      [...str.toUpperCase().padEnd(Math.ceil(str.length / 8) * 8, "A")]
+        .map((a) => fromBase32[a])
+        .join("")
+        .match(/.{1,8}/g)
+        .map((a) => parseInt(a, 2)),
+    ),
+  {
+    alphabet: "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567",
+    rx: /^[a-zA-Z2-7]+$/i,
+    is: (s) =>
+      typeof s === "string" && fromBase32.rx.test(s) && s.length % 8 === 0,
+    random: (n) => [...getRandomValues(new Uint8Array(16*n))].map(k => fromBase32.alphabet[k & 31]).join('')
+  },
+);
+Object.assign(
+  fromBase32,
+  Object.fromEntries(
+    [...fromBase32.alphabet].map((key, index) => [
+      key,
+      index.toString(2).padStart(5, 0),
+    ]),
+  ),
+);
+
+function padCounter(counter) {
+  const array = new Uint8Array(8).fill(0);
+  counter = counter.toString(16).padStart(16, "0");
+  let byte = 0;
+  while (counter.length) {
+    array[byte++] = parseInt(counter.slice(0, 2), 16);
+    counter = counter.slice(2);
+  }
+  return array;
+}
+
+function truncate(hmac, digits) {
+  const offset = hmac[hmac.length - 1] & 0x0f;
+  const value =
+    ((hmac[offset + 0] & 0x7f) << 24) |
+    ((hmac[offset + 1] & 0xff) << 16) |
+    ((hmac[offset + 2] & 0xff) << 8) |
+    (hmac[offset + 3] & 0xff);
+  return value % 10 ** digits;
+}
+const otp = async (url) => {
+  url = url instanceof URL ? url : new URL(url);
+  const type = url.hostname.toLowerCase() === "totp" ? "totp" : "hotp";
+  const period =
+    type === "totp"
+      ? parseInt(url.searchParams.get("period") ?? 30)
+      : undefined;
+  const counter = padCounter(
+    type === "totp"
+      ? Math.floor(Date.now() / 1000 / period)
+      : parseInt(url.searchParams.get("counter") ?? 0),
+  );
+  const secret =
+    fromBase32(url.searchParams.get("secret")) || new Uint8Array([]);
+  const digits = parseInt(url.searchParams.get("digits") ?? 6);
+  const algorithm = [
+    ...((url.searchParams.get("algorithm") ?? "sha1").match(
+      /^(sha)-?(1|256|384|512)$/i,
+    ) ?? []),
+  ]
+    .slice(1)
+    .join("-")
+    .toUpperCase();
+  const hmacKey = await crypto.subtle.importKey(
+    "raw",
+    secret,
+    { name: "HMAC", hash: { name: algorithm } },
+    false,
+    ["sign"],
+  );
+  const hmac = await crypto.subtle.sign("HMAC", hmacKey, counter);
+  return String(truncate(new Uint8Array(hmac), digits)).padStart(digits, "0");
+};
+
+const usage = async (level = 0, msg) => {
+  const short = level !== 0;
+  const stream = !short ? process.stdout : process.stderr;
+  const randomSecret = fromBase32.random(1);
+  const mockUrl = `otpauth://totp/npm:${process.env.USER}?secret=${fromBase32.random(2)}&issuer=npm`;
+  stream.write(
+    [
+      msg,
+      `usage: ${basename(process.argv[1])} [([flags] command|{name|url|secret})]...`,
+      `  flags:`,
+      `    --clip/-c    toggle clipboard`,
+      `    --stdout/-s  toggle stdout output`,
+      `    --help/-h    print this and exit`,
+      ...short ? [] : [
+        `    the default for tty is clipboard, no stdout`,
+        `    the default for a pipe is stdout, no clipboard`,
+        `    to flip both at once, use -cs`,
+      ],
+      `  commands:`,
+      `    list                     List the OTPs in your store (the default)`,
+      `    add {name} {url|secret}  Add a named OTP`,
+      `    code {name|url|secret}   Generate a code`,
+      ...short ? [] : [
+        `  OTP URLs are stored in \${HOME}/.local/org.fordi.otp.store, as an SQLite3 database,`,
+        `  and are encrypted with a secret key; the key is in your Gnome secret service, or `,
+        `  Windows credentials manager or, failing those, the file \${HOME}/.local/org.fordi.otp,`,
+        `  itself encrypted with a hash of \`\$USER:\$UID:{APP_SECRET}\``,
+        `  it ain't much, really - someone with local root could probably figure it out,`,
+        `  but makes damn certain it's not in cleartext.`,
+        `  Examples:`,
+        `    $ otp add npm ${mockUrl}`,
+        `    $ otp code npm # code for npm is now on your clipboard`,
+        `    $ otp code -cs npm # or just \`otp -cs npm\``,
+        `    ${await otp(mockUrl)}`,
+        `    $ otp list # or just \`otp\``,
+        `    npm`,
+        `    github`,
+        `    $ otp -cs code ${randomSecret} # or otp -cs ${randomSecret}`,
+        `    ${await otp(urlFromSecret(randomSecret))}`,
+        `    $ npm publish --access=public --otp=$(otp npm) # command-line publish without the fuss`,
+      ],
+    ]
+      .filter((a) => !!a)
+      .join("\n") + "\n",
+  );
+  process.exit(level);
+};
+
+const clip = (text) =>
+  spawnSync("xclip", ["-selection", "clipboard"], {
+    input: text,
+    encoding: "utf-8",
+    stdio: ["pipe", "ignore", "ignore"],
+  });
+
+const store = new SecretManager("org.fordi.otp", process.env);
+const flagsDefault = process.stdout.isTTY
+  ? { clipboard: true }
+  : { stdout: true };
+
+async function parseArgs(args) {
+  const commands = [];
+  let flags = { ...flagsDefault };
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg[0] === "-" && arg[1] !== "-") {
+      for (const a of arg.slice(1)) {
+        switch (a) {
+          case "c":
+            flags.clipboard = !flags.clipboard;
+            break;
+          case "s":
+            flags.stdout = !flags.stdout;
+            break;
+          case "h":
+            await usage();
+          default:
+            await usage(1, `Unknown flag: -${a}`);
+        }
+      }
+      continue;
+    }
+    switch (arg) {
+      case "add":
+        commands.push(["add", args[++i], args[++i], flags]);
+        flags = { ...flagsDefault };
+        break;
+      case "code":
+        commands.push(["code", args[++i], undefined, flags]);
+        flags = { ...flagsDefault };
+        break;
+      case "--clip":
+        flags.clipboard = !flags.clipboard;
+        break;
+      case "--stdout":
+        flags.stdout = !flags.stdout;
+        break;
+      case "--help":
+        await usage();
+      default:
+        if (arg.startsWith("--")) {
+          await usage(1, `Unknown flag: ${arg}`);
+        }
+        commands.push(["implicit", arg, undefined, flags]);
+        flags = { ...flagsDefault };
+        break;
+    }
+  }
+  if (commands.length === 0) {
+    commands.push(["list", undefined, undefined, flags]);
+  }
+  return commands;
+}
+
+const logAndClipCode = async (url, flags) => {
+  const code = await otp(url instanceof URL ? url.toString() : url);
+  if (flags.stdout) console.log(code);
+  if (flags.clipboard) clip(code);
+};
+
+const urlFromSecret = (secret) => {
+  const url = new URL("otpauth://totp/anon");
+  url.searchParams.set("secret", secret);
+  return url;
+};
+
+async function main(args) {
+  const commands = await parseArgs(args);
+  for (let [command, name, value, flags] of commands) {
+    switch (command) {
+      case "add":
+        try {
+          store.set(name, new URL(value).toString());
+          if (flags.stdout) console.log(`Stored ${name}`);
+        } catch (e) {
+          if (e.code === "ERR_INVALID_URL") {
+            if (fromBase32.is(value)) {
+              store.set(name, urlFromSecret(value).toString());
+            }
+            e.message += " and doesn't parse as a simple secret";
+          }
+          await usage(1, e.message);
+        }
+        break;
+      case "code":
+      case "implicit":
+        try {
+          await logAndClipCode(new URL(name), flags);
+        } catch (e) {
+          if (e.code !== "ERR_INVALID_URL") {
+            await usage(1, e.message);
+          }
+        }
+        const url = await store.get(name);
+        if (!url) {
+          if (fromBase32.is(name)) {
+            await logAndClipCode(urlFromSecret(name), flags);
+            break;
+          }
+          await usage(1, `No code named ${name}`);
+        }
+        await logAndClipCode(url, flags);
+        break;
+      case "list":
+        const keys = await store.list();
+        if (!keys.length) {
+          process.stderr.write(`No OTPs in the store\n`);
+        }
+        console.log(keys.join("\n"));
+        break;
+    }
+  }
+}
+
+main(process.argv.slice(2)).catch((e) => console.error(e));
