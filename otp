@@ -1,4 +1,4 @@
-#!/usr/bin/env node -S --no-warnings=ExperimentalWarning
+#!/usr/bin/env -S node --no-warnings=ExperimentalWarning
 import { spawnSync } from "node:child_process";
 import { chmod, readFile, stat, writeFile } from "node:fs/promises";
 import { join, basename } from "node:path";
@@ -365,6 +365,7 @@ const usage = async (level = 0, msg) => {
       `    --clip/-c    toggle clipboard`,
       `    --stdout/-s  toggle stdout output`,
       `    --help/-h    print this and exit`,
+      `    --update/-u  update from GitHub`,
       ...short ? [] : [
         `    the default for tty is clipboard, no stdout`,
         `    the default for a pipe is stdout, no clipboard`,
@@ -412,6 +413,11 @@ const flagsDefault = process.stdout.isTTY
   ? { clipboard: true }
   : { stdout: true };
 
+async function update() {
+  await writeFile(process.argv[1], await fetch("https://raw.githubusercontent.com/Fordi/otp/refs/heads/main/otp").then((r) => r.body));
+  process.exit();
+}
+
 async function parseArgs(args) {
   const commands = [];
   let flags = { ...flagsDefault };
@@ -428,6 +434,8 @@ async function parseArgs(args) {
             break;
           case "h":
             await usage();
+          case "u":
+            await update();
           default:
             await usage(1, `Unknown flag: -${a}`);
         }
@@ -451,6 +459,8 @@ async function parseArgs(args) {
         break;
       case "--help":
         await usage();
+      case "--update":
+        await update();
       default:
         if (arg.startsWith("--")) {
           await usage(1, `Unknown flag: ${arg}`);
@@ -480,50 +490,50 @@ const urlFromSecret = (secret) => {
 
 async function main(args) {
   const commands = await parseArgs(args);
-  for (let [command, name, value, flags] of commands) {
-    switch (command) {
-      case "add":
-        try {
-          store.set(name, new URL(value).toString());
-          if (flags.stdout) console.log(`Stored ${name}`);
-        } catch (e) {
-          if (e.code === "ERR_INVALID_URL") {
-            if (fromBase32.is(value)) {
-              store.set(name, urlFromSecret(value).toString());
-            }
-            e.message += " and doesn't parse as a simple secret";
-          }
-          await usage(1, e.message);
-        }
-        break;
-      case "code":
-      case "implicit":
-        try {
-          await logAndClipCode(new URL(name), flags);
-        } catch (e) {
-          if (e.code !== "ERR_INVALID_URL") {
-            await usage(1, e.message);
-          }
-        }
-        const url = await store.get(name);
-        if (!url) {
-          if (fromBase32.is(name)) {
-            await logAndClipCode(urlFromSecret(name), flags);
-            break;
-          }
-          await usage(1, `No code named ${name}`);
-        }
-        await logAndClipCode(url, flags);
-        break;
-      case "list":
-        const keys = await store.list();
-        if (!keys.length) {
-          process.stderr.write(`No OTPs in the store\n`);
-        }
-        console.log(keys.join("\n"));
-        break;
-    }
-  }
+  // for (let [command, name, value, flags] of commands) {
+  //   switch (command) {
+  //     case "add":
+  //       try {
+  //         store.set(name, new URL(value).toString());
+  //         if (flags.stdout) console.log(`Stored ${name}`);
+  //       } catch (e) {
+  //         if (e.code === "ERR_INVALID_URL") {
+  //           if (fromBase32.is(value)) {
+  //             store.set(name, urlFromSecret(value).toString());
+  //           }
+  //           e.message += " and doesn't parse as a simple secret";
+  //         }
+  //         await usage(1, e.message);
+  //       }
+  //       break;
+  //     case "code":
+  //     case "implicit":
+  //       try {
+  //         await logAndClipCode(new URL(name), flags);
+  //       } catch (e) {
+  //         if (e.code !== "ERR_INVALID_URL") {
+  //           await usage(1, e.message);
+  //         }
+  //       }
+  //       const url = await store.get(name);
+  //       if (!url) {
+  //         if (fromBase32.is(name)) {
+  //           await logAndClipCode(urlFromSecret(name), flags);
+  //           break;
+  //         }
+  //         await usage(1, `No code named ${name}`);
+  //       }
+  //       await logAndClipCode(url, flags);
+  //       break;
+  //     case "list":
+  //       const keys = await store.list();
+  //       if (!keys.length) {
+  //         process.stderr.write(`No OTPs in the store\n`);
+  //       }
+  //       console.log(keys.join("\n"));
+  //       break;
+  //   }
+  // }
 }
 
 main(process.argv.slice(2)).catch((e) => console.error(e));
