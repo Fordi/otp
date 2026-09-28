@@ -166,6 +166,7 @@ class BinarySecret {
     if (typeof secret === "string") {
       secret = new TextEncoder().encode(secret);
     }
+    console.log(secret.length);
     const payload = (
       await encrypt(await getUserHash(this.#user, this.#uid), secret)
     )
@@ -213,19 +214,19 @@ class SecretManager {
       HOME,
       USERPROFILE,
     } = process.env,
-    { verbose } = defaultFlags,
+    { verbose, home: flagHome } = defaultFlags,
   ) {
     const user =
       USER ??
       (HOME && basename(HOME)) ??
       (USERPROFILE && basename(USERPROFILE)) ??
       "root";
-    const home =
-      HOME ?? USERPROFILE ?? (user === "root" ? "/root" : `/home/${user}`);
-    mkdirSync(join(home, ".local"), { recursive: true });
-    const keyFile = join(home, ".local", `${appName}.key`);
-    const storeFile = join(home, ".local", `${appName}.store`);
-    if (XDG_SESSION_TYPE === "tty" || !XDG_SESSION_TYPE) {
+    const home = HOME ?? USERPROFILE ?? (user === "root" ? "/root" : `/home/${user}`);
+    const local = flagHome ?? join(home, ".local");
+    mkdirSync(local, { recursive: true });
+    const keyFile = join(local, `${appName}.key`);
+    const storeFile = join(local, `${appName}.store`);
+    if (XDG_SESSION_TYPE === "tty" || !XDG_SESSION_TYPE || true) {
       if (verbose) {
         process.stderr.write(`Using BinarySecret at ${keyFile}\n`);
       }
@@ -383,10 +384,12 @@ const usage = async (level = 0, msg) => {
       `    --clip/-c    toggle clipboard`,
       `    --stdout/-s  toggle stdout output`,
       `    --help/-h    print this and exit`,
-      `    --update/-u  update from GitHub`,
       ...(short
         ? []
         : [
+            `    --home/-H {home} use a home directory other than ~/.local`,
+            `    --update/-u  update from GitHub`,
+            `    --verbose/-v Say more`,
             `    the default for tty is clipboard, no stdout`,
             `    the default for a pipe is stdout, no clipboard`,
             `    to flip both at once, use -cs`,
@@ -450,7 +453,8 @@ async function parseArgs(args) {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg[0] === "-" && arg[1] !== "-") {
-      for (const a of arg.slice(1)) {
+      for (let j = 1; j < arg.length; j++) {
+        const a = arg[j];
         switch (a) {
           case "c":
             flags.clipboard = !flags.clipboard;
@@ -460,6 +464,12 @@ async function parseArgs(args) {
             break;
           case "h":
             await usage();
+          case "H":
+            if (j !== arg.length - 1) {
+              throw new Error("H must be last shorthanded single-arg");
+            }
+            flags.home = args[++i];
+            break;
           case "u":
             await update();
           case "v":
@@ -492,6 +502,9 @@ async function parseArgs(args) {
         await update();
       case "--verbose":
         flags.verbose = (flags.verbose ?? 0) + 1;
+        break;
+      case "--home":
+        flags.home = args[++i];
         break;
       default:
         if (arg.startsWith("--")) {
