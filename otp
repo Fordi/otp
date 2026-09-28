@@ -589,6 +589,7 @@ export const usage = async (level = 0, msg) => {
             `## Examples`,
             "",
             "```sh",
+            `$ # None of these are real secrets`,
             `$ otp add npm ${mockUrl}`,
             `$ otp code npm # code for npm is now on your clipboard`,
             `$ otp code -cs npm # or just \`otp -cs npm\``,
