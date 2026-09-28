@@ -614,8 +614,8 @@ export const markdownTable = (rows) => {
 export const usage = async (level = 0, msg) => {
   const short = level !== 0;
   const stream = process.stderr;
-  const randomSecret = fromBase32.random(1);
-  const mockUrl = `otpauth://totp/npm:${process.env.USER}?secret=${fromBase32.random(2)}&issuer=npm`;
+  const randomSecret = "234567ABCDEFGHIJ";
+  const mockUrl = `otpauth://totp/npm:coolfellow?secret=ABCDEFGHIJKLMNOPQRSTUVWXYZ234567&issuer=npm`;
   stream.write(
     [
       msg && `**${msg}**`,
@@ -643,13 +643,13 @@ export const usage = async (level = 0, msg) => {
               ["`--verbose` / `-v`", "say more"],
             ]),
       ]),
-      "",
       ...(short
         ? []
         : [
-            `- the default for a tty is clipboard, no stdout`,
-            `- the default for a pipe is stdout, no clipboard`,
-            `- to flip both at once, use \`-cs\``,
+            "",
+            "- the default for a tty is clipboard, no stdout",
+            "- the default for a pipe is stdout, no clipboard",
+            "- to flip both at once, use `-cs`",
           ]),
       "",
       `## Commands`,
@@ -660,9 +660,16 @@ export const usage = async (level = 0, msg) => {
         ["`add {name} {url\\|secret}`", "Add a named OTP"],
         ["`code {name\\|url\\|secret}`", "Generate a code"],
         ["`delete {name}`", "Delete a named OTP"],
-        ["`export {filename}`", "Export the store to an encrypted, gzipped file (prompts for a password)"],
-        ["`import {filename}`", "Import OTPs from a file made with `export` (prompts for a password)"],
+        ["`export {filename}`", "Export the store to an encrypted, gzipped file"],
+        ["`import {filename}`", "Import OTPs from a file made with `export`"],
       ]),
+      ...(short
+        ? []
+        : [
+            "",
+            "- `import` and `export` prompt for a password unless one is piped in.",
+          ]),
+      "",
       "",
       ...(short
         ? []
@@ -687,8 +694,8 @@ export const usage = async (level = 0, msg) => {
             `$ otp list # or just \`otp\``,
             markdownTable([
               ["Name", "Type", "Issuer", "Account"],
-              ["npm", "totp", "npm", process.env.USER ?? ""],
-              ["github", "totp", "GitHub", process.env.USER ?? ""],
+              ["npm", "totp", "npm", "coolfellow"],
+              ["github", "totp", "GitHub", "jiveguy"],
             ]),
             `$ otp -cs code ${randomSecret} # or otp -cs ${randomSecret}`,
             `${await otp(urlFromSecret(randomSecret))}`,

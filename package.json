@@ -6,7 +6,8 @@
   "scripts": {
     "test": "c8 node --test",
     "format": "npx prettier --parser babel --write otp **/*.js .github/**/*.js",
-    "format-check": "npx prettier --parser babel --check otp **/*.js .github/**/*.js"
+    "format-check": "npx prettier --parser babel --check otp **/*.js .github/**/*.js",
+    "update-usage": "sed -i '/## Usage/,$d' README.md; ./otp --help >> README.md 2>&1"
   },
   "repository": {
     "type": "git",

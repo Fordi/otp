@@ -61,14 +61,17 @@ otp [([flags] command|{name|url|secret})]...
 
 ## Commands
 
-| Command                    | Description                                                             |
-| -------------------------- | ----------------------------------------------------------------------- |
-| `list`                     | List the OTPs in your store (the default)                               |
-| `add {name} {url\|secret}` | Add a named OTP                                                         |
-| `code {name\|url\|secret}` | Generate a code                                                         |
-| `delete {name}`            | Delete a named OTP                                                      |
-| `export {filename}`        | Export the store to an encrypted, gzipped file (prompts for a password) |
-| `import {filename}`        | Import OTPs from a file made with `export` (prompts for a password)     |
+| Command                    | Description                                    |
+| -------------------------- | ---------------------------------------------- |
+| `list`                     | List the OTPs in your store (the default)      |
+| `add {name} {url\|secret}` | Add a named OTP                                |
+| `code {name\|url\|secret}` | Generate a code                                |
+| `delete {name}`            | Delete a named OTP                             |
+| `export {filename}`        | Export the store to an encrypted, gzipped file |
+| `import {filename}`        | Import OTPs from a file made with `export`     |
+
+- `import` and `export` prompt for a password unless one is piped in.
+
 
 ## Storage
 
@@ -83,23 +86,16 @@ but makes damn certain it's not in cleartext.
 
 ```sh
 $ # None of these are real secrets
-$ otp add npm otpauth://totp/npm:fordi?secret=U2AN7MKZ5U6ZQVCBLOQYRPKI6D6MRT5A&issuer=npm
+$ otp add npm otpauth://totp/npm:coolfellow?secret=ABCDEFGHIJKLMNOPQRSTUVWXYZ234567&issuer=npm
 $ otp code npm # code for npm is now on your clipboard
 $ otp code -cs npm # or just `otp -cs npm`
-647876
+028090
 $ otp list # or just `otp`
-| Name   | Type | Issuer | Account |
-| ------ | ---- | ------ | ------- |
-| npm    | totp | npm    | fordi   |
-| github | totp | GitHub | fordi   |
-$ otp -cs code US2UG2XG7HSPPEWM # or otp -cs US2UG2XG7HSPPEWM
-189115
+| Name   | Type | Issuer | Account    |
+| ------ | ---- | ------ | ---------- |
+| npm    | totp | npm    | coolfellow |
+| github | totp | GitHub | jiveguy    |
+$ otp -cs code 234567ABCDEFGHIJ # or otp -cs 234567ABCDEFGHIJ
+038331
 $ npm publish --access=public --otp=$(otp npm) # command-line publish without the fuss
-$ otp export otp-backup.bin # export your whole store; you'll be prompted for a password
-Password: 
-Confirm password: 
-Exported to otp-backup.bin
-$ otp import otp-backup.bin # import it into another machine's store
-Password: 
-Imported from otp-backup.bin
 ```
