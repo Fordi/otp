@@ -463,7 +463,8 @@ async function parseArgs(args) {
           case "u":
             await update();
           case "v":
-            flags.verbose = (flags.verbose ?? 0) + 1; break;
+            flags.verbose = (flags.verbose ?? 0) + 1;
+            break;
           default:
             await usage(1, `Unknown flag: -${a}`);
         }
@@ -490,7 +491,8 @@ async function parseArgs(args) {
       case "--update":
         await update();
       case "--verbose":
-        flags.verbose = (flags.verbose ?? 0) + 1; break;
+        flags.verbose = (flags.verbose ?? 0) + 1;
+        break;
       default:
         if (arg.startsWith("--")) {
           await usage(1, `Unknown flag: ${arg}`);
@@ -521,7 +523,7 @@ let store;
 
 async function main(args, env) {
   const commands = await parseArgs(args);
-  
+
   for (let [command, name, value, flags] of commands) {
     switch (command) {
       case "add":
@@ -533,6 +535,7 @@ async function main(args, env) {
           if (e.code === "ERR_INVALID_URL") {
             if (fromBase32.is(value)) {
               store.set(name, urlFromSecret(value).toString());
+              break;
             }
             e.message += " and doesn't parse as a simple secret";
           }
