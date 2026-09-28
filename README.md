@@ -55,18 +55,19 @@ otp [([flags] command|{name|url|secret})]...
 | `--update` / `-u`      | update from GitHub                         |
 | `--verbose` / `-v`     | say more                                   |
 
-
 - the default for a tty is clipboard, no stdout
 - the default for a pipe is stdout, no clipboard
 - to flip both at once, use `-cs`
 
 ## Commands
 
-| Command                    | Description                               |
-| -------------------------- | ----------------------------------------- |
-| `list`                     | List the OTPs in your store (the default) |
-| `add {name} {url\|secret}` | Add a named OTP                           |
-| `code {name\|url\|secret}` | Generate a code                           |
+| Command                        | Description                                    |
+| ------------------------------ | ---------------------------------------------- |
+| `list`                         | List the OTPs in your store (the default)      |
+| `add {name} {url\|secret}`     | Add a named OTP                                |
+| `code {name\|url\|secret}`     | Generate a code                                |
+| `export {password} {filename}` | Export the store to an encrypted, gzipped file |
+| `import {filename} {password}` | Import OTPs from a file made with `export`     |
 
 ## Storage
 
@@ -91,4 +92,6 @@ github
 $ otp -cs code US2UG2XG7HSPPEWM # or otp -cs US2UG2XG7HSPPEWM
 189115
 $ npm publish --access=public --otp=$(otp npm) # command-line publish without the fuss
+$ otp export hunter2 otp-backup.bin # export your whole store, encrypted with a password
+$ otp import otp-backup.bin hunter2 # import it into another machine's store
 ```

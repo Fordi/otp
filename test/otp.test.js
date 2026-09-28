@@ -50,6 +50,16 @@ describe("parseArgs", () => {
     ok(commands[0][3].clipboard);
   });
 
+  it("parses export with password and filename", async () => {
+    const commands = await otp.parseArgs(["export", "hunter2", "out.bin"]);
+    deepEqual(commands[0].slice(0, 3), ["export", "hunter2", "out.bin"]);
+  });
+
+  it("parses import with filename and password", async () => {
+    const commands = await otp.parseArgs(["import", "out.bin", "hunter2"]);
+    deepEqual(commands[0].slice(0, 3), ["import", "out.bin", "hunter2"]);
+  });
+
   it("parses long flags --clip and --stdout", async () => {
     const original = process.stdout.isTTY;
     process.stdout.isTTY = false;
@@ -413,6 +423,26 @@ describe("getUserHash", () => {
   it("differs for different inputs", async () => {
     const a = await otp.getUserHash("alice", 1000);
     const b = await otp.getUserHash("bob", 1000);
+    ok(Buffer.from(a).toString("hex") !== Buffer.from(b).toString("hex"));
+  });
+});
+
+describe("getPasswordHash", () => {
+  it("is a SHA-256 digest of the password", async () => {
+    const hash = await otp.getPasswordHash("hunter2");
+    const expected = await crypto.subtle.digest("SHA-256", otp.encode("hunter2"));
+    deepEqual(new Uint8Array(hash), new Uint8Array(expected));
+  });
+
+  it("is deterministic for the same password", async () => {
+    const a = await otp.getPasswordHash("hunter2");
+    const b = await otp.getPasswordHash("hunter2");
+    deepEqual(new Uint8Array(a), new Uint8Array(b));
+  });
+
+  it("differs for different passwords", async () => {
+    const a = await otp.getPasswordHash("hunter2");
+    const b = await otp.getPasswordHash("hunter3");
     ok(Buffer.from(a).toString("hex") !== Buffer.from(b).toString("hex"));
   });
 });
@@ -790,6 +820,70 @@ describe("SecretManager", () => {
       const flags = { home: join(dir, "local") };
       const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
       equal(await store.get("nope"), "");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("exports and imports a store, round-tripping every entry", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const env = makeEnv(dir);
+      const flags1 = { home: join(dir, "local1") };
+      const store1 = new otp.SecretManager("org.fordi.otp", env, flags1);
+      const url1 = `otpauth://totp/svc1?secret=${secret}`;
+      const url2 = `otpauth://hotp/svc2?secret=${secret}&counter=5`;
+      await store1.set("svc1", url1);
+      await store1.set("svc2", url2);
+
+      const exportFile = join(dir, "export.bin");
+      await store1.export("hunter2", exportFile);
+      ok(existsSync(exportFile));
+
+      const flags2 = { home: join(dir, "local2") };
+      const store2 = new otp.SecretManager("org.fordi.otp", env, flags2);
+      await store2.import("hunter2", exportFile);
+
+      deepEqual((await store2.list()).sort(), ["svc1", "svc2"]);
+      equal(await store2.get("svc1"), url1);
+      equal(await store2.get("svc2"), url2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects import with the wrong password", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const env = makeEnv(dir);
+      const flags1 = { home: join(dir, "local1") };
+      const store1 = new otp.SecretManager("org.fordi.otp", env, flags1);
+      await store1.set("svc", `otpauth://totp/svc?secret=${secret}`);
+
+      const exportFile = join(dir, "export.bin");
+      await store1.export("correct-password", exportFile);
+
+      const flags2 = { home: join(dir, "local2") };
+      const store2 = new otp.SecretManager("org.fordi.otp", env, flags2);
+      await rejects(() => store2.import("wrong-password", exportFile));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("exports an empty store as an empty, importable file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const env = makeEnv(dir);
+      const flags1 = { home: join(dir, "local1") };
+      const store1 = new otp.SecretManager("org.fordi.otp", env, flags1);
+      const exportFile = join(dir, "export.bin");
+      await store1.export("hunter2", exportFile);
+
+      const flags2 = { home: join(dir, "local2") };
+      const store2 = new otp.SecretManager("org.fordi.otp", env, flags2);
+      await store2.import("hunter2", exportFile);
+      deepEqual(await store2.list(), []);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1246,5 +1340,46 @@ describe("main", () => {
       await otp.main(["--home", dir], env);
       equal(log.mock.calls.length, 1);
     });
+  });
+
+  it("exports the store to a file, then imports it into a fresh store", async (t) => {
+    const originalIsTTY = process.stdout.isTTY;
+    process.stdout.isTTY = false;
+    try {
+      await withTmpDir(async (dir) => {
+        const log = t.mock.method(console, "log", () => {});
+        const env = makeEnv(dir);
+        await otp.main(
+          ["--home", dir, "add", "svc", `otpauth://totp/svc?secret=${secret}`],
+          env,
+        );
+
+        const exportFile = join(dir, "export.bin");
+        log.mock.resetCalls();
+        await otp.main(["--home", dir, "export", "hunter2", exportFile], env);
+        ok(
+          log.mock.calls[0].arguments[0].includes(`Exported to ${exportFile}`),
+        );
+        ok(existsSync(exportFile));
+
+        const otherDir = join(dir, "other-home");
+        log.mock.resetCalls();
+        await otp.main(
+          ["--home", otherDir, "import", exportFile, "hunter2"],
+          env,
+        );
+        ok(
+          log.mock.calls[0].arguments[0].includes(
+            `Imported from ${exportFile}`,
+          ),
+        );
+
+        log.mock.resetCalls();
+        await otp.main(["--home", otherDir], env);
+        equal(log.mock.calls[0].arguments[0], "svc");
+      });
+    } finally {
+      process.stdout.isTTY = originalIsTTY;
+    }
   });
 });
