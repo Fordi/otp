@@ -4,8 +4,6 @@
 
 Test coverage is available at https://fordi.github.io/otp/coverage/index.html
 
-
-
 ## Installation
 
 ```sh
@@ -18,6 +16,28 @@ or
 . <(curl -sSL https://fordi.github.io/otp/install | bash)
 ```
 
+## System dependencies
+
+`otp` uses your OS's native secret storage and clipboard when it can, and
+falls back to an encrypted file (`${HOME}/.local/org.fordi.otp`) otherwise.
+For better security, install the tools below for your platform:
+
+- **Linux (GNOME, KDE, or any Secret Service provider)**: `libsecret-tools`
+  (provides `secret-tool`) for secret storage. For clipboard support,
+  `xclip` on X11 sessions, or `wl-clipboard` (provides `wl-copy`) on
+  Wayland sessions (detected via `$WAYLAND_DISPLAY`). Without
+  `libsecret-tools`, or outside a D-Bus session, `otp` falls back to the
+  encrypted file automatically.
+- **macOS**: none required — uses the built-in `security` (Keychain) and
+  `pbcopy` commands.
+- **Windows**: none required — uses PowerShell's `SecureString` cmdlets and
+  the built-in `clip` command.
+
+If `otp` was previously using the encrypted-file fallback and a proper
+secret store becomes available (e.g. you install `libsecret-tools`), it
+automatically migrates the existing secret into the new store the next
+time it runs, and renames the old key file to `org.fordi.otp.key.migrated`.
+
 ## Usage
 
 ```text
@@ -26,7 +46,9 @@ usage: otp [([flags] command|{name|url|secret})]...
     --clip/-c    toggle clipboard
     --stdout/-s  toggle stdout output
     --help/-h    print this and exit
+    --home/-H {home} use a home directory other than ~/.local
     --update/-u  update from GitHub
+    --verbose/-v Say more
     the default for tty is clipboard, no stdout
     the default for a pipe is stdout, no clipboard
     to flip both at once, use -cs

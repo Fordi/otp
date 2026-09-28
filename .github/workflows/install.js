@@ -8,7 +8,7 @@ const PATH_LINE = `PATH="\${PATH}:${INSTALL_PATH}"`;
 let rc = [];
 try {
   rc = (await readFile(profile, "utf8")).split("\n");
-} catch (e) { }
+} catch (e) {}
 const pathIndex = rc.indexOf(PATH_LINE);
 if (pathIndex === -1) {
   rc.push(PATH_LINE);
@@ -16,7 +16,11 @@ if (pathIndex === -1) {
 await writeFile(profile, rc.join("\n"), "utf8");
 
 let code = (await readFile(target, "utf8")).split("\n");
-code.splice(0, code.findIndex(line => line.startsWith("import")), process.env.SHEBANG);
+code.splice(
+  0,
+  code.findIndex((line) => line.startsWith("import")),
+  process.env.SHEBANG,
+);
 await writeFile(target, code.join("\n"), "utf8");
 const mode = (await stat(target)).mode;
 await chmod(target, mode | 0o100);

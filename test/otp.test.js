@@ -1,9 +1,22 @@
 import { deepEqual, equal, ok, rejects, throws } from "node:assert";
 import { describe, it } from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as otp from "../otp";
+
+const withPlatform = (platform, fn) => {
+  const original = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", {
+    value: platform,
+    configurable: true,
+  });
+  try {
+    return fn();
+  } finally {
+    Object.defineProperty(process, "platform", original);
+  }
+};
 
 describe("parseArgs", () => {
   it("parses an argument list and environment", async () => {
@@ -41,12 +54,7 @@ describe("parseArgs", () => {
     const original = process.stdout.isTTY;
     process.stdout.isTTY = false;
     try {
-      const commands = await otp.parseArgs([
-        "--clip",
-        "--stdout",
-        "code",
-        "x",
-      ]);
+      const commands = await otp.parseArgs(["--clip", "--stdout", "code", "x"]);
       ok(commands[0][3].clipboard);
       ok(!commands[0][3].stdout);
     } finally {
@@ -128,7 +136,6 @@ describe("parseArgs", () => {
     await rejects(() => otp.parseArgs(["--help"]), /exit/);
     equal(process.exit.mock.calls[1].arguments[0], 0);
   });
-
 });
 
 describe("flagsDefault", () => {
@@ -385,35 +392,65 @@ describe("urlFromSecret", () => {
   });
 });
 
-describe("clip", () => {
-  const withPlatform = (platform, fn) => {
-    const original = Object.getOwnPropertyDescriptor(process, "platform");
-    Object.defineProperty(process, "platform", {
-      value: platform,
-      configurable: true,
-    });
-    try {
-      return fn();
-    } finally {
-      Object.defineProperty(process, "platform", original);
-    }
-  };
+describe("hasCommand", () => {
+  it("returns true when the command resolves", (t) => {
+    const spawnSync = t.mock.method(otp.proc, "spawnSync", () => ({
+      status: 0,
+    }));
+    ok(otp.hasCommand("secret-tool"));
+    equal(spawnSync.mock.calls.length, 1);
+    const [cmd, args] = spawnSync.mock.calls[0].arguments;
+    equal(cmd, "sh");
+    deepEqual(args, ["-c", "command -v secret-tool"]);
+  });
 
+  it("returns false when the command is missing", (t) => {
+    t.mock.method(otp.proc, "spawnSync", () => ({ status: 1 }));
+    ok(!otp.hasCommand("not-a-real-command"));
+  });
+});
+
+describe("clip", () => {
   it("returns the spawnSync result", (t) => {
     t.mock.method(otp.proc, "spawnSync", () => ({ status: 0 }));
     const result = otp.clip("123456");
     equal(typeof result.status, "number");
   });
 
-  it("uses xclip on non-Windows platforms", (t) => {
+  it("uses xclip on X11 Linux sessions", (t) => {
     const spawnSync = t.mock.method(otp.proc, "spawnSync", () => ({
       status: 0,
     }));
-    withPlatform("linux", () => otp.clip("123456"));
+    const original = process.env.WAYLAND_DISPLAY;
+    delete process.env.WAYLAND_DISPLAY;
+    try {
+      withPlatform("linux", () => otp.clip("123456"));
+    } finally {
+      if (original !== undefined) process.env.WAYLAND_DISPLAY = original;
+    }
     equal(spawnSync.mock.calls.length, 1);
     const [cmd, args, opts] = spawnSync.mock.calls[0].arguments;
     equal(cmd, "xclip");
     deepEqual(args, ["-selection", "clipboard"]);
+    equal(opts.input, "123456");
+  });
+
+  it("uses wl-copy on Wayland Linux sessions", (t) => {
+    const spawnSync = t.mock.method(otp.proc, "spawnSync", () => ({
+      status: 0,
+    }));
+    const original = process.env.WAYLAND_DISPLAY;
+    process.env.WAYLAND_DISPLAY = "wayland-0";
+    try {
+      withPlatform("linux", () => otp.clip("123456"));
+    } finally {
+      if (original === undefined) delete process.env.WAYLAND_DISPLAY;
+      else process.env.WAYLAND_DISPLAY = original;
+    }
+    equal(spawnSync.mock.calls.length, 1);
+    const [cmd, args, opts] = spawnSync.mock.calls[0].arguments;
+    equal(cmd, "wl-copy");
+    deepEqual(args, []);
     equal(opts.input, "123456");
   });
 
@@ -427,6 +464,84 @@ describe("clip", () => {
     equal(cmd, "clip");
     deepEqual(args, []);
     equal(opts.input, "123456");
+  });
+
+  it("uses pbcopy on macOS", (t) => {
+    const spawnSync = t.mock.method(otp.proc, "spawnSync", () => ({
+      status: 0,
+    }));
+    withPlatform("darwin", () => otp.clip("123456"));
+    equal(spawnSync.mock.calls.length, 1);
+    const [cmd, args, opts] = spawnSync.mock.calls[0].arguments;
+    equal(cmd, "pbcopy");
+    deepEqual(args, []);
+    equal(opts.input, "123456");
+  });
+});
+
+describe("KeychainSecret", () => {
+  it("reads via `security find-generic-password -w`", async (t) => {
+    const spawnSync = t.mock.method(otp.proc, "spawnSync", () => ({
+      status: 0,
+      stdout: Buffer.from("hello").toString("base64url") + "\n",
+    }));
+    const s = new otp.KeychainSecret("org.fordi.otp", "alice");
+    const result = await s.read();
+    equal(spawnSync.mock.calls.length, 1);
+    const [cmd, args, opts] = spawnSync.mock.calls[0].arguments;
+    equal(cmd, "security");
+    deepEqual(args, [
+      "find-generic-password",
+      "-s",
+      "org.fordi.otp",
+      "-a",
+      "alice",
+      "-w",
+    ]);
+    equal(opts.encoding, "utf8");
+    equal(otp.decode(result), "hello");
+  });
+
+  it("writes via `security add-generic-password -U`", async (t) => {
+    const spawnSync = t.mock.method(otp.proc, "spawnSync", () => ({
+      status: 0,
+    }));
+    const s = new otp.KeychainSecret("org.fordi.otp", "alice");
+    await s.write(otp.encode("hello"));
+    equal(spawnSync.mock.calls.length, 1);
+    const [cmd, args, opts] = spawnSync.mock.calls[0].arguments;
+    equal(cmd, "security");
+    deepEqual(args, [
+      "add-generic-password",
+      "-U",
+      "-s",
+      "org.fordi.otp",
+      "-a",
+      "alice",
+      "-w",
+      Buffer.from(otp.encode("hello")).toString("base64url"),
+    ]);
+    equal(opts.encoding, "utf8");
+  });
+
+  it("throws ENOENT when the keychain lookup fails", async (t) => {
+    t.mock.method(otp.proc, "spawnSync", () => ({ status: 1 }));
+    const s = new otp.KeychainSecret("org.fordi.otp", "alice");
+    await rejects(() => s.read(), { code: "ENOENT" });
+  });
+
+  it("throws a descriptive error when the keychain write fails", async (t) => {
+    t.mock.method(otp.proc, "spawnSync", () => ({ status: 1 }));
+    const s = new otp.KeychainSecret("org.fordi.otp", "alice");
+    await rejects(
+      () => s.write(otp.encode("hello")),
+      (e) => {
+        ok(e instanceof Error);
+        ok(e.message.includes("org.fordi.otp"));
+        ok(e.message.includes("alice"));
+        return true;
+      },
+    );
   });
 });
 
@@ -494,13 +609,16 @@ describe("SecretServiceSecret", () => {
       { domain: "org.fordi.otp", user: "alice" },
       "my label",
     );
-    await rejects(() => s.write(otp.encode("hello")), (e) => {
-      ok(e instanceof Error);
-      ok(e.message.includes('Couldn\'t write secret "my label"'));
-      ok(e.message.includes('domain="org.fordi.otp"'));
-      ok(e.message.includes('user="alice"'));
-      return true;
-    });
+    await rejects(
+      () => s.write(otp.encode("hello")),
+      (e) => {
+        ok(e instanceof Error);
+        ok(e.message.includes('Couldn\'t write secret "my label"'));
+        ok(e.message.includes('domain="org.fordi.otp"'));
+        ok(e.message.includes('user="alice"'));
+        return true;
+      },
+    );
   });
 });
 
@@ -659,7 +777,9 @@ describe("SecretManager", () => {
     try {
       const write = t.mock.method(process.stderr, "write", () => true);
       const flags = { home: join(dir, "local"), verbose: true };
-      new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      withPlatform("linux", () => {
+        new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      });
       ok(write.mock.calls[0].arguments[0].includes("BinarySecret"));
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -670,51 +790,17 @@ describe("SecretManager", () => {
     const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
     try {
       const flags = { home: join(dir, "local") };
-      const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      const store = withPlatform(
+        "linux",
+        () => new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags),
+      );
       ok(store.secretService instanceof otp.BinarySecret);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("uses SecretServiceSecret when a session is non-tty with dbus", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
-    try {
-      const flags = { home: join(dir, "local") };
-      const env = {
-        XDG_SESSION_TYPE: "x11",
-        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
-        USER: "tester",
-        UID: 1000,
-        HOME: dir,
-      };
-      const store = new otp.SecretManager("org.fordi.otp", env, flags);
-      ok(store.secretService instanceof otp.SecretServiceSecret);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("logs verbose output when using SecretServiceSecret", async (t) => {
-    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
-    try {
-      const write = t.mock.method(process.stderr, "write", () => true);
-      const flags = { home: join(dir, "local"), verbose: true };
-      const env = {
-        XDG_SESSION_TYPE: "x11",
-        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
-        USER: "tester",
-        UID: 1000,
-        HOME: dir,
-      };
-      new otp.SecretManager("org.fordi.otp", env, flags);
-      ok(write.mock.calls[0].arguments[0].includes("Using SecretService"));
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("uses WindowsSecureStringSecret when non-tty without dbus", async () => {
+  it("uses BinarySecret as the ultimate fallback (non-Windows, no dbus)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
     try {
       const flags = { home: join(dir, "local") };
@@ -725,8 +811,224 @@ describe("SecretManager", () => {
         UID: 1000,
         HOME: dir,
       };
-      const store = new otp.SecretManager("org.fordi.otp", env, flags);
+      const store = withPlatform(
+        "linux",
+        () => new otp.SecretManager("org.fordi.otp", env, flags),
+      );
+      ok(store.secretService instanceof otp.BinarySecret);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses SecretServiceSecret when a session is non-tty with dbus and secret-tool is present", async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      t.mock.method(otp.proc, "spawnSync", () => ({ status: 0 }));
+      const flags = { home: join(dir, "local") };
+      const env = {
+        XDG_SESSION_TYPE: "x11",
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+        USER: "tester",
+        UID: 1000,
+        HOME: dir,
+      };
+      const store = withPlatform(
+        "linux",
+        () => new otp.SecretManager("org.fordi.otp", env, flags),
+      );
+      ok(store.secretService instanceof otp.SecretServiceSecret);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("logs verbose output when using SecretServiceSecret", async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      t.mock.method(otp.proc, "spawnSync", () => ({ status: 0 }));
+      const write = t.mock.method(process.stderr, "write", () => true);
+      const flags = { home: join(dir, "local"), verbose: true };
+      const env = {
+        XDG_SESSION_TYPE: "x11",
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+        USER: "tester",
+        UID: 1000,
+        HOME: dir,
+      };
+      withPlatform("linux", () => {
+        new otp.SecretManager("org.fordi.otp", env, flags);
+      });
+      ok(write.mock.calls[0].arguments[0].includes("Using SecretService"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to BinarySecret when secret-tool is absent", async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      t.mock.method(otp.proc, "spawnSync", () => ({ status: 1 }));
+      const flags = { home: join(dir, "local") };
+      const env = {
+        XDG_SESSION_TYPE: "x11",
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+        USER: "tester",
+        UID: 1000,
+        HOME: dir,
+      };
+      const store = withPlatform(
+        "linux",
+        () => new otp.SecretManager("org.fordi.otp", env, flags),
+      );
+      ok(store.secretService instanceof otp.BinarySecret);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates an existing BinarySecret to a newly chosen provider", async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const ttyEnv = makeEnv(dir);
+
+      const originalStore = withPlatform(
+        "linux",
+        () => new otp.SecretManager("org.fordi.otp", ttyEnv, flags),
+      );
+      const originalSecret = await originalStore.getSecret();
+      const keyFile = join(dir, "local", "org.fordi.otp.key");
+      ok(existsSync(keyFile));
+
+      let stashed;
+      t.mock.method(otp.proc, "spawnSync", (cmd, args, opts) => {
+        if (cmd === "sh") return { status: 0 };
+        if (cmd === "secret-tool" && args[0] === "lookup") {
+          return stashed ? { status: 0, stdout: stashed } : { status: 1 };
+        }
+        if (cmd === "secret-tool" && args[0] === "store") {
+          stashed = opts.input;
+          return { status: 0 };
+        }
+        throw new Error(`unexpected spawnSync(${cmd})`);
+      });
+
+      const dbusEnv = {
+        XDG_SESSION_TYPE: "x11",
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+        USER: "tester",
+        UID: 1000,
+        HOME: dir,
+      };
+      const migratedStore = withPlatform(
+        "linux",
+        () => new otp.SecretManager("org.fordi.otp", dbusEnv, flags),
+      );
+      ok(migratedStore.secretService instanceof otp.SecretServiceSecret);
+
+      const migratedSecret = await migratedStore.getSecret();
+      deepEqual(new Uint8Array(migratedSecret), new Uint8Array(originalSecret));
+      ok(!existsSync(keyFile));
+      ok(existsSync(`${keyFile}.migrated`));
+
+      const secretAgain = await migratedStore.getSecret();
+      deepEqual(new Uint8Array(secretAgain), new Uint8Array(originalSecret));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("logs a message when migrating", async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const ttyEnv = makeEnv(dir);
+      const originalStore = withPlatform(
+        "linux",
+        () => new otp.SecretManager("org.fordi.otp", ttyEnv, flags),
+      );
+      await originalStore.getSecret();
+
+      t.mock.method(otp.proc, "spawnSync", () => ({ status: 0 }));
+      const write = t.mock.method(process.stderr, "write", () => true);
+      const dbusEnv = {
+        XDG_SESSION_TYPE: "x11",
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+        USER: "tester",
+        UID: 1000,
+        HOME: dir,
+      };
+      withPlatform(
+        "linux",
+        () =>
+          new otp.SecretManager("org.fordi.otp", dbusEnv, {
+            ...flags,
+            verbose: true,
+          }),
+      );
+      ok(write.mock.calls.some((c) => c.arguments[0].includes("Migrating")));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses WindowsSecureStringSecret when platform is win32", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const env = {
+        XDG_SESSION_TYPE: "x11",
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+        USER: "tester",
+        UID: 1000,
+        HOME: dir,
+      };
+      const store = withPlatform(
+        "win32",
+        () => new otp.SecretManager("org.fordi.otp", env, flags),
+      );
       ok(store.secretService instanceof otp.WindowsSecureStringSecret);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses KeychainSecret when platform is darwin", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const env = {
+        XDG_SESSION_TYPE: "tty",
+        USER: "tester",
+        UID: 1000,
+        HOME: dir,
+      };
+      const store = withPlatform(
+        "darwin",
+        () => new otp.SecretManager("org.fordi.otp", env, flags),
+      );
+      ok(store.secretService instanceof otp.KeychainSecret);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("logs verbose output when using KeychainSecret", async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const write = t.mock.method(process.stderr, "write", () => true);
+      const flags = { home: join(dir, "local"), verbose: true };
+      const env = {
+        XDG_SESSION_TYPE: "tty",
+        USER: "tester",
+        UID: 1000,
+        HOME: dir,
+      };
+      withPlatform("darwin", () => {
+        new otp.SecretManager("org.fordi.otp", env, flags);
+      });
+      ok(write.mock.calls[0].arguments[0].includes("Using Keychain"));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -744,11 +1046,11 @@ describe("SecretManager", () => {
         UID: 1000,
         HOME: dir,
       };
-      new otp.SecretManager("org.fordi.otp", env, flags);
+      withPlatform("win32", () => {
+        new otp.SecretManager("org.fordi.otp", env, flags);
+      });
       ok(
-        write.mock.calls[0].arguments[0].includes(
-          "Using WindowsSecureString",
-        ),
+        write.mock.calls[0].arguments[0].includes("Using WindowsSecureString"),
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -811,7 +1113,8 @@ describe("main", () => {
       t.mock.method(process.stderr, "write", () => true);
       const env = makeEnv(dir);
       await rejects(
-        () => otp.main(["--home", dir, "add", "svc", "not a url or secret"], env),
+        () =>
+          otp.main(["--home", dir, "add", "svc", "not a url or secret"], env),
         /exit/,
       );
       equal(process.exit.mock.calls[0].arguments[0], 1);
@@ -827,10 +1130,7 @@ describe("main", () => {
       const env = makeEnv(dir);
       await rejects(
         () =>
-          otp.main(
-            ["--home", dir, "add", "svc", "otpauth://totp/svc"],
-            env,
-          ),
+          otp.main(["--home", dir, "add", "svc", "otpauth://totp/svc"], env),
         /exit/,
       );
       equal(process.exit.mock.calls[0].arguments[0], 1);
@@ -852,7 +1152,12 @@ describe("main", () => {
       const log = t.mock.method(console, "log", () => {});
       const env = makeEnv(dir);
       await otp.main(
-        ["--home", dir, "code", `otpauth://hotp/svc?secret=${secret}&counter=0`],
+        [
+          "--home",
+          dir,
+          "code",
+          `otpauth://hotp/svc?secret=${secret}&counter=0`,
+        ],
         env,
       );
       equal(log.mock.calls.length, 1);
