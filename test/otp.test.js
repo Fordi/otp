@@ -386,21 +386,46 @@ describe("urlFromSecret", () => {
 });
 
 describe("clip", () => {
+  const withPlatform = (platform, fn) => {
+    const original = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", {
+      value: platform,
+      configurable: true,
+    });
+    try {
+      return fn();
+    } finally {
+      Object.defineProperty(process, "platform", original);
+    }
+  };
+
   it("returns the spawnSync result", (t) => {
     t.mock.method(otp.proc, "spawnSync", () => ({ status: 0 }));
     const result = otp.clip("123456");
     equal(typeof result.status, "number");
   });
 
-  it("passes the expected argv and input to spawnSync", (t) => {
+  it("uses xclip on non-Windows platforms", (t) => {
     const spawnSync = t.mock.method(otp.proc, "spawnSync", () => ({
       status: 0,
     }));
-    otp.clip("123456");
+    withPlatform("linux", () => otp.clip("123456"));
     equal(spawnSync.mock.calls.length, 1);
     const [cmd, args, opts] = spawnSync.mock.calls[0].arguments;
     equal(cmd, "xclip");
     deepEqual(args, ["-selection", "clipboard"]);
+    equal(opts.input, "123456");
+  });
+
+  it("uses clip on Windows", (t) => {
+    const spawnSync = t.mock.method(otp.proc, "spawnSync", () => ({
+      status: 0,
+    }));
+    withPlatform("win32", () => otp.clip("123456"));
+    equal(spawnSync.mock.calls.length, 1);
+    const [cmd, args, opts] = spawnSync.mock.calls[0].arguments;
+    equal(cmd, "clip");
+    deepEqual(args, []);
     equal(opts.input, "123456");
   });
 });

@@ -487,11 +487,17 @@ export const usage = async (level = 0, msg) => {
 };
 
 export const clip = (text) =>
-  proc.spawnSync("xclip", ["-selection", "clipboard"], {
-    input: text,
-    encoding: "utf-8",
-    stdio: ["pipe", "ignore", "ignore"],
-  });
+  process.platform === "win32"
+    ? proc.spawnSync("clip", [], {
+        input: text,
+        encoding: "utf-8",
+        stdio: ["pipe", "ignore", "ignore"],
+      })
+    : proc.spawnSync("xclip", ["-selection", "clipboard"], {
+        input: text,
+        encoding: "utf-8",
+        stdio: ["pipe", "ignore", "ignore"],
+      });
 
 export const flagsDefault = () =>
   process.stdout.isTTY ? { clipboard: true } : { stdout: true };
