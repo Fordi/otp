@@ -179,7 +179,7 @@ class BinarySecret {
 class SecretManager {
   #secretService;
   #file;
-  #open(tableName) {
+  #open() {
     const store = new DatabaseSync(this.#file);
     store.exec(
       `CREATE TABLE IF NOT EXISTS store (key TEXT PRIMARY KEY, iv BLOB, encrypted BLOB)`,
@@ -212,7 +212,8 @@ class SecretManager {
       UID,
       HOME,
       USERPROFILE,
-    },
+    } = process.env,
+    { verbose } = defaultFlags,
   ) {
     const user =
       USER ??
@@ -225,13 +226,22 @@ class SecretManager {
     const keyFile = join(home, ".local", `${appName}.key`);
     const storeFile = join(home, ".local", `${appName}.store`);
     if (XDG_SESSION_TYPE === "tty" || !XDG_SESSION_TYPE) {
+      if (verbose) {
+        process.stderr.write(`Using BinarySecret at ${keyFile}\n`);
+      }
       this.#secretService = new BinarySecret(keyFile, user, UID ?? 0);
     } else if (DBUS_SESSION_BUS_ADDRESS) {
+      if (verbose) {
+        process.stderr.write(`Using SecretService\n`);
+      }
       this.#secretService = new SecretServiceSecret({ domain: appName });
     } else {
+      if (verbose) {
+        process.stderr.write(`Using WindowsSecureString in ${keyFile}\n`);
+      }
       this.#secretService = new WindowsSecureStringSecret(keyFile);
     }
-    this.#file = join(HOME, storeFile);
+    this.#file = storeFile;
   }
   async getSecret() {
     try {
@@ -420,7 +430,6 @@ const clip = (text) =>
     stdio: ["pipe", "ignore", "ignore"],
   });
 
-const store = new SecretManager("org.fordi.otp", process.env);
 const flagsDefault = process.stdout.isTTY
   ? { clipboard: true }
   : { stdout: true };
@@ -453,6 +462,8 @@ async function parseArgs(args) {
             await usage();
           case "u":
             await update();
+          case "v":
+            flags.verbose = (flags.verbose ?? 0) + 1; break;
           default:
             await usage(1, `Unknown flag: -${a}`);
         }
@@ -478,6 +489,8 @@ async function parseArgs(args) {
         await usage();
       case "--update":
         await update();
+      case "--verbose":
+        flags.verbose = (flags.verbose ?? 0) + 1; break;
       default:
         if (arg.startsWith("--")) {
           await usage(1, `Unknown flag: ${arg}`);
@@ -504,53 +517,58 @@ const urlFromSecret = (secret) => {
   url.searchParams.set("secret", secret);
   return url;
 };
+let store;
 
-async function main(args) {
+async function main(args, env) {
   const commands = await parseArgs(args);
-  // for (let [command, name, value, flags] of commands) {
-  //   switch (command) {
-  //     case "add":
-  //       try {
-  //         store.set(name, new URL(value).toString());
-  //         if (flags.stdout) console.log(`Stored ${name}`);
-  //       } catch (e) {
-  //         if (e.code === "ERR_INVALID_URL") {
-  //           if (fromBase32.is(value)) {
-  //             store.set(name, urlFromSecret(value).toString());
-  //           }
-  //           e.message += " and doesn't parse as a simple secret";
-  //         }
-  //         await usage(1, e.message);
-  //       }
-  //       break;
-  //     case "code":
-  //     case "implicit":
-  //       try {
-  //         await logAndClipCode(new URL(name), flags);
-  //       } catch (e) {
-  //         if (e.code !== "ERR_INVALID_URL") {
-  //           await usage(1, e.message);
-  //         }
-  //       }
-  //       const url = await store.get(name);
-  //       if (!url) {
-  //         if (fromBase32.is(name)) {
-  //           await logAndClipCode(urlFromSecret(name), flags);
-  //           break;
-  //         }
-  //         await usage(1, `No code named ${name}`);
-  //       }
-  //       await logAndClipCode(url, flags);
-  //       break;
-  //     case "list":
-  //       const keys = await store.list();
-  //       if (!keys.length) {
-  //         process.stderr.write(`No OTPs in the store\n`);
-  //       }
-  //       console.log(keys.join("\n"));
-  //       break;
-  //   }
-  // }
+  
+  for (let [command, name, value, flags] of commands) {
+    switch (command) {
+      case "add":
+        try {
+          store = new SecretManager("org.fordi.otp", env, flags);
+          store.set(name, new URL(value).toString());
+          if (flags.stdout) console.log(`Stored ${name}`);
+        } catch (e) {
+          if (e.code === "ERR_INVALID_URL") {
+            if (fromBase32.is(value)) {
+              store.set(name, urlFromSecret(value).toString());
+            }
+            e.message += " and doesn't parse as a simple secret";
+          }
+          await usage(1, e.message);
+        }
+        break;
+      case "code":
+      case "implicit":
+        store = new SecretManager("org.fordi.otp", env, flags);
+        try {
+          await logAndClipCode(new URL(name), flags);
+        } catch (e) {
+          if (e.code !== "ERR_INVALID_URL") {
+            await usage(1, e.message);
+          }
+        }
+        const url = await store.get(name);
+        if (!url) {
+          if (fromBase32.is(name)) {
+            await logAndClipCode(urlFromSecret(name), flags);
+            break;
+          }
+          await usage(1, `No code named ${name}`);
+        }
+        await logAndClipCode(url, flags);
+        break;
+      case "list":
+        store = new SecretManager("org.fordi.otp", env, flags);
+        const keys = await store.list();
+        if (!keys.length) {
+          process.stderr.write(`No OTPs in the store\n`);
+        }
+        console.log(keys.join("\n"));
+        break;
+    }
+  }
 }
 
-main(process.argv.slice(2)).catch((e) => console.error(e));
+main(process.argv.slice(2), process.env).catch((e) => console.error(e));
