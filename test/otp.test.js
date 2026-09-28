@@ -294,6 +294,41 @@ describe("isOtpUrl", () => {
   });
 });
 
+describe("markdownTable", () => {
+  it("renders a header, separator, and aligned rows", () => {
+    const result = otp.markdownTable([
+      ["Flag", "Description"],
+      ["-c", "toggle clipboard"],
+      ["-H {home}", "use a home directory"],
+    ]);
+    deepEqual(result.split("\n"), [
+      "| Flag      | Description          |",
+      "| --------- | -------------------- |",
+      "| -c        | toggle clipboard     |",
+      "| -H {home} | use a home directory |",
+    ]);
+  });
+
+  it("pads columns to the widest cell, including the header", () => {
+    const result = otp.markdownTable([
+      ["A", "B"],
+      ["short", "x"],
+      ["y", "much longer value"],
+    ]);
+    const lines = result.split("\n");
+    const pipeColumns = lines.map((line) =>
+      [...line].reduce((acc, ch, i) => (ch === "|" ? [...acc, i] : acc), []),
+    );
+    deepEqual(pipeColumns[0], pipeColumns[1]);
+    deepEqual(pipeColumns[0], pipeColumns[2]);
+  });
+
+  it("handles a single-row (header-only) table", () => {
+    const result = otp.markdownTable([["Only", "Header"]]);
+    deepEqual(result.split("\n"), ["| Only | Header |", "| ---- | ------ |"]);
+  });
+});
+
 describe("otp() - RFC test vectors", () => {
   const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
 

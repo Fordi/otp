@@ -40,37 +40,54 @@ time it runs, and renames the old key file to `org.fordi.otp.key.migrated`.
 
 ## Usage
 
-```text
-usage: otp [([flags] command|{name|url|secret})]...
-  flags:
-    --clip/-c    toggle clipboard
-    --stdout/-s  toggle stdout output
-    --help/-h    print this and exit
-    --home/-H {home} use a home directory other than ~/.local
-    --update/-u  update from GitHub
-    --verbose/-v Say more
-    the default for tty is clipboard, no stdout
-    the default for a pipe is stdout, no clipboard
-    to flip both at once, use -cs
-  commands:
-    list                     List the OTPs in your store (the default)
-    add {name} {url|secret}  Add a named OTP
-    code {name|url|secret}   Generate a code
-  OTP URLs are stored in ${HOME}/.local/org.fordi.otp.store, as an SQLite3 database,
-  and are encrypted with a secret key; the key is in your Gnome secret service, or 
-  Windows credentials manager or, failing those, the file ${HOME}/.local/org.fordi.otp,
-  itself encrypted with a hash of `$USER:$UID:{APP_SECRET}`
-  it ain't much, really - someone with local root could probably figure it out,
-  but makes damn certain it's not in cleartext.
-  Examples:
-    $ otp add npm otpauth://totp/npm:user?secret=Y52TLDU3HF4QVNOBY7443DVPOWHL2YVO&issuer=npm
-    $ otp code npm # code for npm is now on your clipboard
-    $ otp code -cs npm # or just `otp -cs npm`
-    196898
-    $ otp list # or just `otp`
-    npm
-    github
-    $ otp -cs code FHPOM7WEUIIXNCP5 # or otp -cs FHPOM7WEUIIXNCP5
-    936297
-    $ npm publish --access=public --otp=$(otp npm) # command-line publish without the fuss
+```
+otp [([flags] command|{name|url|secret})]...
+```
+
+## Flags
+
+| Flag                   | Description                                |
+| ---------------------- | ------------------------------------------ |
+| `--clip` / `-c`        | toggle clipboard                           |
+| `--stdout` / `-s`      | toggle stdout output                       |
+| `--help` / `-h`        | print this and exit                        |
+| `--home` / `-H {home}` | use a home directory other than `~/.local` |
+| `--update` / `-u`      | update from GitHub                         |
+| `--verbose` / `-v`     | say more                                   |
+
+
+- the default for a tty is clipboard, no stdout
+- the default for a pipe is stdout, no clipboard
+- to flip both at once, use `-cs`
+
+## Commands
+
+| Command                    | Description                               |
+| -------------------------- | ----------------------------------------- |
+| `list`                     | List the OTPs in your store (the default) |
+| `add {name} {url\|secret}` | Add a named OTP                           |
+| `code {name\|url\|secret}` | Generate a code                           |
+
+## Storage
+
+OTP URLs are stored in `${HOME}/.local/org.fordi.otp.store`, as an SQLite3 database,
+and are encrypted with a secret key; the key is in your Gnome secret service, or
+Windows credentials manager or, failing those, the file `${HOME}/.local/org.fordi.otp`,
+itself encrypted with a hash of `$USER:$UID:{APP_SECRET}`.
+It ain't much, really - someone with local root could probably figure it out,
+but makes damn certain it's not in cleartext.
+
+## Examples
+
+```sh
+$ otp add npm otpauth://totp/npm:fordi?secret=U2AN7MKZ5U6ZQVCBLOQYRPKI6D6MRT5A&issuer=npm
+$ otp code npm # code for npm is now on your clipboard
+$ otp code -cs npm # or just `otp -cs npm`
+647876
+$ otp list # or just `otp`
+npm
+github
+$ otp -cs code US2UG2XG7HSPPEWM # or otp -cs US2UG2XG7HSPPEWM
+189115
+$ npm publish --access=public --otp=$(otp npm) # command-line publish without the fuss
 ```
