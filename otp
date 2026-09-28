@@ -221,7 +221,7 @@ class SecretManager {
       "root";
     const home =
       HOME ?? USERPROFILE ?? (user === "root" ? "/root" : `/home/${user}`);
-    mkdirSync(join(home, ".local"));
+    mkdirSync(join(home, ".local"), { recursive: true });
     const keyFile = join(home, ".local", `${appName}.key`);
     const storeFile = join(home, ".local", `${appName}.store`);
     if (XDG_SESSION_TYPE === "tty") {
