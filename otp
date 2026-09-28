@@ -166,7 +166,6 @@ class BinarySecret {
     if (typeof secret === "string") {
       secret = new TextEncoder().encode(secret);
     }
-    console.log(secret.length);
     const payload = (
       await encrypt(await getUserHash(this.#user, this.#uid), secret)
     )
