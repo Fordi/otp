@@ -66,6 +66,7 @@ otp [([flags] command|{name|url|secret})]...
 | `list`                     | List the OTPs in your store (the default)                               |
 | `add {name} {url\|secret}` | Add a named OTP                                                         |
 | `code {name\|url\|secret}` | Generate a code                                                         |
+| `delete {name}`            | Delete a named OTP                                                      |
 | `export {filename}`        | Export the store to an encrypted, gzipped file (prompts for a password) |
 | `import {filename}`        | Import OTPs from a file made with `export` (prompts for a password)     |
 
@@ -87,8 +88,10 @@ $ otp code npm # code for npm is now on your clipboard
 $ otp code -cs npm # or just `otp -cs npm`
 647876
 $ otp list # or just `otp`
-npm
-github
+| Name   | Type | Issuer | Account |
+| ------ | ---- | ------ | ------- |
+| npm    | totp | npm    | fordi   |
+| github | totp | GitHub | fordi   |
 $ otp -cs code US2UG2XG7HSPPEWM # or otp -cs US2UG2XG7HSPPEWM
 189115
 $ npm publish --access=public --otp=$(otp npm) # command-line publish without the fuss

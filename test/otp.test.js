@@ -23,7 +23,7 @@ describe("parseArgs", () => {
   it("parses an argument list and environment", async () => {
     const commands = await otp.parseArgs(["-cs", "code", "npm"], {});
     deepEqual(commands, [
-      ["code", "npm", undefined, { clipboard: true, stdout: false }],
+      ["code", "npm", undefined, { clipboard: true, stdio: false }],
     ]);
   });
 
@@ -49,6 +49,11 @@ describe("parseArgs", () => {
       "otpauth://totp/npm?secret=AAAA",
     ]);
     ok(commands[0][3].clipboard);
+  });
+
+  it("parses delete with a name", async () => {
+    const commands = await otp.parseArgs(["delete", "npm"]);
+    deepEqual(commands[0].slice(0, 3), ["delete", "npm", undefined]);
   });
 
   it("parses export with just a filename", async () => {
@@ -150,11 +155,11 @@ describe("parseArgs", () => {
 });
 
 describe("flagsDefault", () => {
-  it("defaults to stdout when not a tty", () => {
+  it("defaults to stdio when not a tty", () => {
     const original = process.stdout.isTTY;
     process.stdout.isTTY = false;
     try {
-      deepEqual(otp.flagsDefault(), { stdout: true });
+      deepEqual(otp.flagsDefault(), { stdio: true });
     } finally {
       process.stdout.isTTY = original;
     }
@@ -302,6 +307,69 @@ describe("isOtpUrl", () => {
   it("rejects period on hotp and counter on totp", () => {
     ok(!otp.isOtpUrl(`otpauth://hotp/test?secret=${secret}&period=30`));
     ok(!otp.isOtpUrl(`otpauth://totp/test?secret=${secret}&counter=5`));
+  });
+});
+
+describe("parseOtpUrl", () => {
+  const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+  it("splits issuer:account out of the label", () => {
+    const result = otp.parseOtpUrl(`otpauth://totp/npm:fordi?secret=${secret}`);
+    equal(result.type, "totp");
+    equal(result.issuer, "npm");
+    equal(result.account, "fordi");
+  });
+
+  it("prefers the issuer query param over the label prefix", () => {
+    const result = otp.parseOtpUrl(
+      `otpauth://totp/label-issuer:fordi?secret=${secret}&issuer=real-issuer`,
+    );
+    equal(result.issuer, "real-issuer");
+    equal(result.account, "fordi");
+  });
+
+  it("treats the whole label as the account when there's no colon", () => {
+    const result = otp.parseOtpUrl(`otpauth://totp/justaname?secret=${secret}`);
+    equal(result.issuer, undefined);
+    equal(result.account, "justaname");
+  });
+
+  it("only splits on the first colon", () => {
+    const result = otp.parseOtpUrl(
+      `otpauth://totp/issuer:account:with:colons?secret=${secret}`,
+    );
+    equal(result.issuer, "issuer");
+    equal(result.account, "account:with:colons");
+  });
+
+  it("decodes URL-encoded labels", () => {
+    const result = otp.parseOtpUrl(
+      `otpauth://totp/Acme%20Co%3Ajane%40acme.com?secret=${secret}`,
+    );
+    equal(result.issuer, "Acme Co");
+    equal(result.account, "jane@acme.com");
+  });
+
+  it("reports hotp type, algorithm, and digits", () => {
+    const result = otp.parseOtpUrl(
+      `otpauth://hotp/svc?secret=${secret}&counter=0&algorithm=sha256&digits=8`,
+    );
+    equal(result.type, "hotp");
+    equal(result.algorithm, "SHA256");
+    equal(result.digits, "8");
+  });
+
+  it("defaults algorithm to SHA1 and digits to 6", () => {
+    const result = otp.parseOtpUrl(`otpauth://totp/svc?secret=${secret}`);
+    equal(result.algorithm, "SHA1");
+    equal(result.digits, "6");
+  });
+
+  it("accepts a URL instance", () => {
+    const result = otp.parseOtpUrl(
+      new URL(`otpauth://totp/npm:fordi?secret=${secret}`),
+    );
+    equal(result.account, "fordi");
   });
 });
 
@@ -456,6 +524,12 @@ describe("urlFromSecret", () => {
     equal(url.hostname, "totp");
     equal(url.searchParams.get("secret"), "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
   });
+
+  it("labels the account with ANONYMOUS_NO_ACCOUNT", () => {
+    const url = otp.urlFromSecret("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
+    equal(url.pathname, `/${otp.ANONYMOUS_NO_ACCOUNT}`);
+    equal(otp.parseOtpUrl(url).account, otp.ANONYMOUS_NO_ACCOUNT);
+  });
 });
 
 describe("prompt.password", () => {
@@ -479,6 +553,15 @@ describe("prompt.password", () => {
     const result = otp.prompt.password("Password: ", { input, output });
     input.emit("data", "hunter2\n");
     equal(await result, "hunter2");
+    deepEqual(output.written, ["Password: "]);
+  });
+
+  it("echoes a trailing newline only on a tty", async () => {
+    const input = makeFakeInput({ isTTY: true });
+    const output = makeFakeOutput();
+    const result = otp.prompt.password("Password: ", { input, output });
+    input.emit("data", "hunter2\n");
+    await result;
     deepEqual(output.written, ["Password: ", "\n"]);
   });
 
@@ -805,16 +888,16 @@ describe("logAndClipCode", () => {
   const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
   const url = `otpauth://hotp/test?secret=${secret}&counter=0`;
 
-  it("logs to stdout when flags.stdout is set", async (t) => {
+  it("logs to stdout when flags.stdio is set", async (t) => {
     const log = t.mock.method(console, "log", () => {});
-    await otp.logAndClipCode(url, { stdout: true, clipboard: false });
+    await otp.logAndClipCode(url, { stdio: true, clipboard: false });
     equal(log.mock.calls.length, 1);
     equal(log.mock.calls[0].arguments[0], "755224");
   });
 
   it("copies to clipboard when flags.clipboard is set", async () => {
     const result = await otp.logAndClipCode(url, {
-      stdout: false,
+      stdio: false,
       clipboard: true,
     });
     equal(result, undefined);
@@ -822,7 +905,7 @@ describe("logAndClipCode", () => {
 
   it("accepts a URL instance", async (t) => {
     const log = t.mock.method(console, "log", () => {});
-    await otp.logAndClipCode(new URL(url), { stdout: true, clipboard: false });
+    await otp.logAndClipCode(new URL(url), { stdio: true, clipboard: false });
     equal(log.mock.calls[0].arguments[0], "755224");
   });
 });
@@ -885,6 +968,31 @@ describe("SecretManager", () => {
       const flags = { home: join(dir, "local") };
       const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
       equal(await store.get("nope"), "");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("deletes a stored entry and reports success", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      const url = `otpauth://totp/svc?secret=${secret}`;
+      await store.set("svc", url);
+      equal(await store.delete("svc"), true);
+      deepEqual(await store.list(), []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns false when deleting a name that doesn't exist", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      equal(await store.delete("nope"), false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1378,38 +1486,186 @@ describe("main", () => {
     });
   });
 
-  it("lists stored OTP names, or a message when empty", async (t) => {
+  it("deletes a named OTP", async (t) => {
     await withTmpDir(async (dir) => {
       const log = t.mock.method(console, "log", () => {});
-      const errWrite = t.mock.method(process.stderr, "write", () => true);
       const env = makeEnv(dir);
-
-      await otp.main(["--home", dir], env);
-      ok(errWrite.mock.calls[0].arguments[0].includes("No OTPs in the store"));
-
-      log.mock.resetCalls();
       await otp.main(
         ["--home", dir, "add", "svc", `otpauth://totp/svc?secret=${secret}`],
         env,
       );
       log.mock.resetCalls();
-      await otp.main(["--home", dir], env);
-      equal(log.mock.calls[0].arguments[0], "svc");
+      await otp.main(["--home", dir, "delete", "svc"], env);
+      ok(log.mock.calls[0].arguments[0].includes("Deleted svc"));
+
+      const store = new otp.SecretManager("org.fordi.otp", env, {
+        home: dir,
+      });
+      deepEqual(await store.list(), []);
     });
+  });
+
+  it("calls usage(1) when deleting a name that doesn't exist", async (t) => {
+    await withTmpDir(async (dir) => {
+      t.mock.method(process, "exit", () => {
+        throw new Error("exit");
+      });
+      t.mock.method(process.stderr, "write", () => true);
+      const env = makeEnv(dir);
+      await rejects(
+        () => otp.main(["--home", dir, "delete", "missing"], env),
+        /exit/,
+      );
+      equal(process.exit.mock.calls[0].arguments[0], 1);
+    });
+  });
+
+  it("lists stored OTPs as a table when interactive, or a message when empty", async (t) => {
+    const originalIsTTY = process.stdout.isTTY;
+    process.stdout.isTTY = true;
+    try {
+      await withTmpDir(async (dir) => {
+        const log = t.mock.method(console, "log", () => {});
+        const errWrite = t.mock.method(process.stderr, "write", () => true);
+        const env = makeEnv(dir);
+
+        await otp.main(["--home", dir], env);
+        ok(
+          errWrite.mock.calls[0].arguments[0].includes("No OTPs in the store"),
+        );
+        equal(log.mock.calls.length, 0);
+
+        log.mock.resetCalls();
+        await otp.main(
+          [
+            "--home",
+            dir,
+            "add",
+            "svc",
+            `otpauth://totp/npm:fordi?secret=${secret}&issuer=npm`,
+          ],
+          env,
+        );
+        log.mock.resetCalls();
+        await otp.main(["--home", dir], env);
+        const output = log.mock.calls[0].arguments[0];
+        ok(output.includes("| Name | Type | Issuer | Account |"));
+        ok(output.includes("svc"));
+        ok(output.includes("totp"));
+        ok(output.includes("npm"));
+        ok(output.includes("fordi"));
+      });
+    } finally {
+      process.stdout.isTTY = originalIsTTY;
+    }
+  });
+
+  it("blanks the account column for ANONYMOUS_NO_ACCOUNT entries", async (t) => {
+    const originalIsTTY = process.stdout.isTTY;
+    process.stdout.isTTY = true;
+    try {
+      await withTmpDir(async (dir) => {
+        const log = t.mock.method(console, "log", () => {});
+        const env = makeEnv(dir);
+        await otp.main(["--home", dir, "add", "raw", secret], env);
+        log.mock.resetCalls();
+        await otp.main(["--home", dir], env);
+        const output = log.mock.calls[0].arguments[0];
+        ok(!output.includes(otp.ANONYMOUS_NO_ACCOUNT));
+        const row = output.split("\n").find((line) => line.includes("raw"));
+        ok(row.trim().endsWith("|"));
+        ok(/\|\s*\|$/.test(row));
+      });
+    } finally {
+      process.stdout.isTTY = originalIsTTY;
+    }
+  });
+
+  it("lists plain names when piped (stdout flag set)", async (t) => {
+    const originalIsTTY = process.stdout.isTTY;
+    process.stdout.isTTY = false;
+    try {
+      await withTmpDir(async (dir) => {
+        const log = t.mock.method(console, "log", () => {});
+        const env = makeEnv(dir);
+        await otp.main(
+          [
+            "--home",
+            dir,
+            "add",
+            "svc",
+            `otpauth://totp/npm:fordi?secret=${secret}&issuer=npm`,
+          ],
+          env,
+        );
+        log.mock.resetCalls();
+        await otp.main(["--home", dir], env);
+        equal(log.mock.calls[0].arguments[0], "svc");
+      });
+    } finally {
+      process.stdout.isTTY = originalIsTTY;
+    }
   });
 
   it("defaults to list with no args", async (t) => {
     await withTmpDir(async (dir) => {
       const log = t.mock.method(console, "log", () => {});
       const env = makeEnv(dir);
+      await otp.main(
+        ["--home", dir, "add", "svc", `otpauth://totp/svc?secret=${secret}`],
+        env,
+      );
+      log.mock.resetCalls();
       await otp.main(["--home", dir], env);
       equal(log.mock.calls.length, 1);
     });
   });
 
-  it("exports the store to a file, then imports it into a fresh store", async (t) => {
-    const originalIsTTY = process.stdout.isTTY;
+  it("exports the store to a file, then imports it into a fresh store (interactive)", async (t) => {
+    const originalStdoutTTY = process.stdout.isTTY;
+    const originalStdinTTY = process.stdin.isTTY;
+    process.stdout.isTTY = true;
+    process.stdin.isTTY = true;
+    try {
+      await withTmpDir(async (dir) => {
+        const log = t.mock.method(console, "log", () => {});
+        const password = t.mock.method(otp.prompt, "password", async () => "hunter2");
+        const env = makeEnv(dir);
+        await otp.main(
+          ["--home", dir, "add", "svc", `otpauth://totp/svc?secret=${secret}`],
+          env,
+        );
+
+        const exportFile = join(dir, "export.bin");
+        log.mock.resetCalls();
+        await otp.main(["--home", dir, "export", exportFile], env);
+        ok(existsSync(exportFile));
+        equal(password.mock.calls.length, 2);
+        equal(password.mock.calls[0].arguments[0], "Password: ");
+        equal(password.mock.calls[1].arguments[0], "Confirm password: ");
+
+        const otherDir = join(dir, "other-home");
+        password.mock.resetCalls();
+        await otp.main(["--home", otherDir, "import", exportFile], env);
+        equal(password.mock.calls.length, 1);
+        equal(password.mock.calls[0].arguments[0], "Password: ");
+
+        const store = new otp.SecretManager("org.fordi.otp", env, {
+          home: otherDir,
+        });
+        deepEqual(await store.list(), ["svc"]);
+      });
+    } finally {
+      process.stdout.isTTY = originalStdoutTTY;
+      process.stdin.isTTY = originalStdinTTY;
+    }
+  });
+
+  it("exports and imports with a single piped password (stdin not a tty)", async (t) => {
+    const originalStdoutTTY = process.stdout.isTTY;
+    const originalStdinTTY = process.stdin.isTTY;
     process.stdout.isTTY = false;
+    process.stdin.isTTY = false;
     try {
       await withTmpDir(async (dir) => {
         const log = t.mock.method(console, "log", () => {});
@@ -1427,9 +1683,8 @@ describe("main", () => {
           log.mock.calls[0].arguments[0].includes(`Exported to ${exportFile}`),
         );
         ok(existsSync(exportFile));
-        equal(password.mock.calls.length, 2);
-        equal(password.mock.calls[0].arguments[0], "Password: ");
-        equal(password.mock.calls[1].arguments[0], "Confirm password: ");
+        equal(password.mock.calls.length, 1);
+        equal(password.mock.calls[0].arguments[0], "");
 
         const otherDir = join(dir, "other-home");
         log.mock.resetCalls();
@@ -1441,34 +1696,67 @@ describe("main", () => {
           ),
         );
         equal(password.mock.calls.length, 1);
+        equal(password.mock.calls[0].arguments[0], "");
 
         log.mock.resetCalls();
         await otp.main(["--home", otherDir], env);
-        equal(log.mock.calls[0].arguments[0], "svc");
+        ok(log.mock.calls[0].arguments[0].includes("svc"));
       });
     } finally {
-      process.stdout.isTTY = originalIsTTY;
+      process.stdout.isTTY = originalStdoutTTY;
+      process.stdin.isTTY = originalStdinTTY;
     }
   });
 
-  it("aborts export when the password confirmation doesn't match", async (t) => {
-    await withTmpDir(async (dir) => {
-      t.mock.method(process, "exit", () => {
-        throw new Error("exit");
+  it("aborts export when the password confirmation doesn't match (interactive)", async (t) => {
+    const originalStdinTTY = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    try {
+      await withTmpDir(async (dir) => {
+        t.mock.method(process, "exit", () => {
+          throw new Error("exit");
+        });
+        t.mock.method(process.stderr, "write", () => true);
+        let call = 0;
+        t.mock.method(otp.prompt, "password", async () =>
+          call++ === 0 ? "hunter2" : "different",
+        );
+        const env = makeEnv(dir);
+        const exportFile = join(dir, "export.bin");
+        await rejects(
+          () => otp.main(["--home", dir, "export", exportFile], env),
+          /exit/,
+        );
+        equal(process.exit.mock.calls[0].arguments[0], 1);
+        ok(!existsSync(exportFile));
       });
-      t.mock.method(process.stderr, "write", () => true);
-      let call = 0;
-      t.mock.method(otp.prompt, "password", async () =>
-        call++ === 0 ? "hunter2" : "different",
-      );
-      const env = makeEnv(dir);
-      const exportFile = join(dir, "export.bin");
-      await rejects(
-        () => otp.main(["--home", dir, "export", exportFile], env),
-        /exit/,
-      );
-      equal(process.exit.mock.calls[0].arguments[0], 1);
-      ok(!existsSync(exportFile));
-    });
+    } finally {
+      process.stdin.isTTY = originalStdinTTY;
+    }
+  });
+
+  it("prompts interactively even when only stdout is piped", async (t) => {
+    const originalStdoutTTY = process.stdout.isTTY;
+    const originalStdinTTY = process.stdin.isTTY;
+    process.stdout.isTTY = false;
+    process.stdin.isTTY = true;
+    try {
+      await withTmpDir(async (dir) => {
+        const password = t.mock.method(
+          otp.prompt,
+          "password",
+          async () => "hunter2",
+        );
+        const env = makeEnv(dir);
+        const exportFile = join(dir, "export.bin");
+        await otp.main(["--home", dir, "export", exportFile], env);
+        equal(password.mock.calls.length, 2);
+        equal(password.mock.calls[0].arguments[0], "Password: ");
+        equal(password.mock.calls[1].arguments[0], "Confirm password: ");
+      });
+    } finally {
+      process.stdout.isTTY = originalStdoutTTY;
+      process.stdin.isTTY = originalStdinTTY;
+    }
   });
 });

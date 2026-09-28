@@ -21,7 +21,7 @@ const _promptPassword = (promptText, { input = process.stdin, output = process.s
       for (const char of chunk) {
         if (char === "\r" || char === "\n") {
           cleanup();
-          output.write("\n");
+          if (isTTY) output.write("\n");
           resolve(password);
           return;
         }
@@ -291,6 +291,7 @@ export class SecretManager {
       "INSERT INTO store (key, iv, encrypted) VALUES(?, ?, ?) ON CONFLICT (key) DO UPDATE SET iv = excluded.iv, encrypted = excluded.encrypted",
     );
     const listKeys = store.prepare("SELECT key FROM store ORDER BY key ASC");
+    const deleteByKey = store.prepare("DELETE FROM store WHERE key = ?");
     return {
       get: (key) => {
         const { iv, encrypted } = getValueByKey.get(key) ?? {};
@@ -300,6 +301,7 @@ export class SecretManager {
         setValueByKey.run(key, iv, encrypted);
       },
       list: () => listKeys.all(),
+      delete: (key) => deleteByKey.run(key).changes > 0,
       close: () => store.close(),
     };
   }
@@ -411,6 +413,15 @@ export class SecretManager {
     const db = this.#open();
     try {
       return db.list().map(({ key }) => key);
+    } finally {
+      db.close();
+    }
+  }
+
+  async delete(name) {
+    const db = this.#open();
+    try {
+      return db.delete(name);
     } finally {
       db.close();
     }
@@ -541,6 +552,20 @@ export const isOtpUrl = (url) => {
   return true;
 };
 
+export const parseOtpUrl = (url) => {
+  url = url instanceof URL ? url : new URL(url);
+  const type = url.hostname.toLowerCase() === "totp" ? "totp" : "hotp";
+  const label = decodeURIComponent(url.pathname.replace(/^\//, ""));
+  const [labelIssuer, labelAccount] = label.includes(":")
+    ? label.split(/:(.*)/s).slice(0, 2)
+    : [undefined, label];
+  const issuer = url.searchParams.get("issuer") ?? labelIssuer;
+  const account = labelAccount || label;
+  const algorithm = (url.searchParams.get("algorithm") ?? "SHA1").toUpperCase();
+  const digits = url.searchParams.get("digits") ?? "6";
+  return { type, issuer, account, algorithm, digits };
+};
+
 export const otp = async (url) => {
   url = url instanceof URL ? url : new URL(url);
   const type = url.hostname.toLowerCase() === "totp" ? "totp" : "hotp";
@@ -634,6 +659,7 @@ export const usage = async (level = 0, msg) => {
         ["`list`", "List the OTPs in your store (the default)"],
         ["`add {name} {url\\|secret}`", "Add a named OTP"],
         ["`code {name\\|url\\|secret}`", "Generate a code"],
+        ["`delete {name}`", "Delete a named OTP"],
         ["`export {filename}`", "Export the store to an encrypted, gzipped file (prompts for a password)"],
         ["`import {filename}`", "Import OTPs from a file made with `export` (prompts for a password)"],
       ]),
@@ -659,8 +685,11 @@ export const usage = async (level = 0, msg) => {
             `$ otp code -cs npm # or just \`otp -cs npm\``,
             `${await otp(mockUrl)}`,
             `$ otp list # or just \`otp\``,
-            `npm`,
-            `github`,
+            markdownTable([
+              ["Name", "Type", "Issuer", "Account"],
+              ["npm", "totp", "npm", process.env.USER ?? ""],
+              ["github", "totp", "GitHub", process.env.USER ?? ""],
+            ]),
             `$ otp -cs code ${randomSecret} # or otp -cs ${randomSecret}`,
             `${await otp(urlFromSecret(randomSecret))}`,
             `$ npm publish --access=public --otp=$(otp npm) # command-line publish without the fuss`,
@@ -692,7 +721,7 @@ export const clip = (text) => {
 };
 
 export const flagsDefault = () =>
-  process.stdout.isTTY ? { clipboard: true } : { stdout: true };
+  process.stdout.isTTY ? { clipboard: true } : { stdio: true };
 
 const SOURCE =
   "https://raw.githubusercontent.com/Fordi/otp/refs/heads/main/otp";
@@ -718,7 +747,7 @@ export async function parseArgs(args) {
             flags.clipboard = !flags.clipboard;
             break;
           case "s":
-            flags.stdout = !flags.stdout;
+            flags.stdio = !flags.stdio;
             break;
           case "h":
             await usage();
@@ -748,6 +777,10 @@ export async function parseArgs(args) {
         commands.push(["code", args[++i], undefined, flags]);
         flags = { ...flagsDefault() };
         break;
+      case "delete":
+        commands.push(["delete", args[++i], undefined, flags]);
+        flags = { ...flagsDefault() };
+        break;
       case "export":
         commands.push(["export", args[++i], undefined, flags]);
         flags = { ...flagsDefault() };
@@ -760,7 +793,7 @@ export async function parseArgs(args) {
         flags.clipboard = !flags.clipboard;
         break;
       case "--stdout":
-        flags.stdout = !flags.stdout;
+        flags.stdio = !flags.stdio;
         break;
       case "--help":
         await usage();
@@ -789,12 +822,14 @@ export async function parseArgs(args) {
 
 export const logAndClipCode = async (url, flags) => {
   const code = await otp(url instanceof URL ? url.toString() : url);
-  if (flags.stdout) console.log(code);
+  if (flags.stdio) console.log(code);
   if (flags.clipboard) clip(code);
 };
 
+export const ANONYMOUS_NO_ACCOUNT = "ANONYMOUS_NO_ACCOUNT";
+
 export const urlFromSecret = (secret) => {
-  const url = new URL("otpauth://totp/anon");
+  const url = new URL(`otpauth://totp/${ANONYMOUS_NO_ACCOUNT}`);
   url.searchParams.set("secret", secret);
   return url;
 };
@@ -809,7 +844,7 @@ export async function main(args, env) {
         store = new SecretManager("org.fordi.otp", env, flags);
         if (isOtpUrl(value)) {
           await store.set(name, new URL(value).toString());
-          if (flags.stdout) console.log(`Stored ${name}`);
+          if (flags.stdio) console.log(`Stored ${name}`);
         } else if (fromBase32.is(value)) {
           await store.set(name, urlFromSecret(value).toString());
         } else {
@@ -833,31 +868,65 @@ export async function main(args, env) {
         }
         await logAndClipCode(url, flags);
         break;
-      case "list":
+      case "delete":
+        store = new SecretManager("org.fordi.otp", env, flags);
+        if (await store.delete(name)) {
+          if (flags.stdio) console.log(`Deleted ${name}`);
+        } else {
+          await usage(1, `No code named ${name}`);
+        }
+        break;
+      case "list": {
         store = new SecretManager("org.fordi.otp", env, flags);
         const keys = await store.list();
         if (!keys.length) {
           process.stderr.write(`No OTPs in the store\n`);
-        }
-        console.log(keys.join("\n"));
-        break;
-      case "export": {
-        store = new SecretManager("org.fordi.otp", env, flags);
-        const password = await prompt.password("Password: ");
-        const confirm = await prompt.password("Confirm password: ");
-        if (password !== confirm) {
-          await usage(1, "Passwords didn't match");
           break;
         }
+        if (flags.stdio) {
+          console.log(keys.join("\n"));
+          break;
+        }
+        const rows = await Promise.all(
+          keys.map(async (key) => {
+            const { type, issuer, account } = parseOtpUrl(await store.get(key));
+            return [
+              key,
+              type,
+              issuer ?? "",
+              account === ANONYMOUS_NO_ACCOUNT ? "" : account,
+            ];
+          }),
+        );
+        console.log(
+          markdownTable([["Name", "Type", "Issuer", "Account"], ...rows]),
+        );
+        break;
+      }
+      case "export": {
+        store = new SecretManager("org.fordi.otp", env, flags);
+        let password;
+        if (process.stdin.isTTY) {
+          password = await prompt.password("Password: ");
+          const confirm = await prompt.password("Confirm password: ");
+          if (password !== confirm) {
+            await usage(1, "Passwords didn't match");
+            break;
+          }
+        } else {
+          password = await prompt.password("");
+        }
         await store.export(password, name);
-        if (flags.stdout) console.log(`Exported to ${name}`);
+        if (flags.stdio) console.log(`Exported to ${name}`);
         break;
       }
       case "import": {
         store = new SecretManager("org.fordi.otp", env, flags);
-        const password = await prompt.password("Password: ");
+        const password = await prompt.password(
+          process.stdin.isTTY ? "Password: " : "",
+        );
         await store.import(password, name);
-        if (flags.stdout) console.log(`Imported from ${name}`);
+        if (flags.stdio) console.log(`Imported from ${name}`);
         break;
       }
     }
