@@ -386,7 +386,8 @@ describe("urlFromSecret", () => {
 });
 
 describe("clip", () => {
-  it("invokes xclip and returns its spawnSync result", () => {
+  it("returns the spawnSync result", (t) => {
+    t.mock.method(otp.proc, "spawnSync", () => ({ status: 0 }));
     const result = otp.clip("123456");
     equal(typeof result.status, "number");
   });
