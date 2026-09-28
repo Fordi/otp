@@ -9,6 +9,45 @@ import { gzipSync, gunzipSync } from "node:zlib";
 // Exposed for testing.
 export const proc = { spawnSync: _spawnSync };
 
+const _promptPassword = (promptText, { input = process.stdin, output = process.stdout } = {}) =>
+  new Promise((resolve, reject) => {
+    output.write(promptText);
+    let password = "";
+    const isTTY = input.isTTY;
+    if (isTTY) input.setRawMode(true);
+    input.resume();
+    input.setEncoding("utf8");
+    const onData = (chunk) => {
+      for (const char of chunk) {
+        if (char === "\r" || char === "\n") {
+          cleanup();
+          output.write("\n");
+          resolve(password);
+          return;
+        }
+        if (char === "\u0003") {
+          cleanup();
+          reject(Object.assign(new Error("Prompt cancelled"), { code: "SIGINT" }));
+          return;
+        }
+        if (char === "\u007f" || char === "\b") {
+          password = password.slice(0, -1);
+          continue;
+        }
+        password += char;
+      }
+    };
+    const cleanup = () => {
+      input.removeListener("data", onData);
+      if (isTTY) input.setRawMode(false);
+      input.pause();
+    };
+    input.on("data", onData);
+  });
+
+// Exposed for testing.
+export const prompt = { password: _promptPassword };
+
 export const hasCommand = (command) =>
   proc.spawnSync("sh", ["-c", `command -v ${command}`]).status === 0;
 
@@ -382,7 +421,7 @@ export class SecretManager {
     for (const name of await this.list()) {
       entries[name] = await this.get(name);
     }
-    const json = gzipSync(encode(JSON.stringify(entries), { level: 9 }));
+    const json = gzipSync(encode(JSON.stringify(entries)),  { level: 9 });
     const [iv, encrypted] = await encrypt(await getPasswordHash(password), json);
     await writeFile(file, Buffer.concat([Buffer.from(iv), Buffer.from(encrypted)]));
   }
@@ -595,8 +634,8 @@ export const usage = async (level = 0, msg) => {
         ["`list`", "List the OTPs in your store (the default)"],
         ["`add {name} {url\\|secret}`", "Add a named OTP"],
         ["`code {name\\|url\\|secret}`", "Generate a code"],
-        ["`export {password} {filename}`", "Export the store to an encrypted, gzipped file"],
-        ["`import {filename} {password}`", "Import OTPs from a file made with `export`"],
+        ["`export {filename}`", "Export the store to an encrypted, gzipped file (prompts for a password)"],
+        ["`import {filename}`", "Import OTPs from a file made with `export` (prompts for a password)"],
       ]),
       "",
       ...(short
@@ -710,11 +749,11 @@ export async function parseArgs(args) {
         flags = { ...flagsDefault() };
         break;
       case "export":
-        commands.push(["export", args[++i], args[++i], flags]);
+        commands.push(["export", args[++i], undefined, flags]);
         flags = { ...flagsDefault() };
         break;
       case "import":
-        commands.push(["import", args[++i], args[++i], flags]);
+        commands.push(["import", args[++i], undefined, flags]);
         flags = { ...flagsDefault() };
         break;
       case "--clip":
@@ -802,16 +841,25 @@ export async function main(args, env) {
         }
         console.log(keys.join("\n"));
         break;
-      case "export":
+      case "export": {
         store = new SecretManager("org.fordi.otp", env, flags);
-        await store.export(name, value);
-        if (flags.stdout) console.log(`Exported to ${value}`);
+        const password = await prompt.password("Password: ");
+        const confirm = await prompt.password("Confirm password: ");
+        if (password !== confirm) {
+          await usage(1, "Passwords didn't match");
+          break;
+        }
+        await store.export(password, name);
+        if (flags.stdout) console.log(`Exported to ${name}`);
         break;
-      case "import":
+      }
+      case "import": {
         store = new SecretManager("org.fordi.otp", env, flags);
-        await store.import(value, name);
+        const password = await prompt.password("Password: ");
+        await store.import(password, name);
         if (flags.stdout) console.log(`Imported from ${name}`);
         break;
+      }
     }
   }
 }

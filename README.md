@@ -61,13 +61,13 @@ otp [([flags] command|{name|url|secret})]...
 
 ## Commands
 
-| Command                        | Description                                    |
-| ------------------------------ | ---------------------------------------------- |
-| `list`                         | List the OTPs in your store (the default)      |
-| `add {name} {url\|secret}`     | Add a named OTP                                |
-| `code {name\|url\|secret}`     | Generate a code                                |
-| `export {password} {filename}` | Export the store to an encrypted, gzipped file |
-| `import {filename} {password}` | Import OTPs from a file made with `export`     |
+| Command                    | Description                                                             |
+| -------------------------- | ----------------------------------------------------------------------- |
+| `list`                     | List the OTPs in your store (the default)                               |
+| `add {name} {url\|secret}` | Add a named OTP                                                         |
+| `code {name\|url\|secret}` | Generate a code                                                         |
+| `export {filename}`        | Export the store to an encrypted, gzipped file (prompts for a password) |
+| `import {filename}`        | Import OTPs from a file made with `export` (prompts for a password)     |
 
 ## Storage
 
@@ -92,6 +92,11 @@ github
 $ otp -cs code US2UG2XG7HSPPEWM # or otp -cs US2UG2XG7HSPPEWM
 189115
 $ npm publish --access=public --otp=$(otp npm) # command-line publish without the fuss
-$ otp export hunter2 otp-backup.bin # export your whole store, encrypted with a password
-$ otp import otp-backup.bin hunter2 # import it into another machine's store
+$ otp export otp-backup.bin # export your whole store; you'll be prompted for a password
+Password: 
+Confirm password: 
+Exported to otp-backup.bin
+$ otp import otp-backup.bin # import it into another machine's store
+Password: 
+Imported from otp-backup.bin
 ```

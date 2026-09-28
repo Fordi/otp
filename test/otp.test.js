@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EventEmitter } from "node:events";
 import * as otp from "../otp";
 
 const withPlatform = (platform, fn) => {
@@ -50,14 +51,14 @@ describe("parseArgs", () => {
     ok(commands[0][3].clipboard);
   });
 
-  it("parses export with password and filename", async () => {
-    const commands = await otp.parseArgs(["export", "hunter2", "out.bin"]);
-    deepEqual(commands[0].slice(0, 3), ["export", "hunter2", "out.bin"]);
+  it("parses export with just a filename", async () => {
+    const commands = await otp.parseArgs(["export", "out.bin"]);
+    deepEqual(commands[0].slice(0, 3), ["export", "out.bin", undefined]);
   });
 
-  it("parses import with filename and password", async () => {
-    const commands = await otp.parseArgs(["import", "out.bin", "hunter2"]);
-    deepEqual(commands[0].slice(0, 3), ["import", "out.bin", "hunter2"]);
+  it("parses import with just a filename", async () => {
+    const commands = await otp.parseArgs(["import", "out.bin"]);
+    deepEqual(commands[0].slice(0, 3), ["import", "out.bin", undefined]);
   });
 
   it("parses long flags --clip and --stdout", async () => {
@@ -455,6 +456,70 @@ describe("urlFromSecret", () => {
     equal(url.hostname, "totp");
     equal(url.searchParams.get("secret"), "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
   });
+});
+
+describe("prompt.password", () => {
+  const makeFakeInput = ({ isTTY = false } = {}) => {
+    const input = new EventEmitter();
+    input.isTTY = isTTY;
+    input.setRawMode = () => {};
+    input.setEncoding = () => {};
+    input.resume = () => {};
+    input.pause = () => {};
+    return input;
+  };
+  const makeFakeOutput = () => {
+    const written = [];
+    return { written, write: (s) => written.push(s) };
+  };
+
+  it("resolves with the typed characters on enter", async () => {
+    const input = makeFakeInput();
+    const output = makeFakeOutput();
+    const result = otp.prompt.password("Password: ", { input, output });
+    input.emit("data", "hunter2\n");
+    equal(await result, "hunter2");
+    deepEqual(output.written, ["Password: ", "\n"]);
+  });
+
+  it("resolves on carriage return", async () => {
+    const input = makeFakeInput();
+    const output = makeFakeOutput();
+    const result = otp.prompt.password("Password: ", { input, output });
+    input.emit("data", "abc\r");
+    equal(await result, "abc");
+  });
+
+  it("handles backspace characters", async () => {
+    const input = makeFakeInput();
+    const output = makeFakeOutput();
+    const result = otp.prompt.password("Password: ", { input, output });
+    input.emit("data", "abcd\u007f\u007f\n");
+    equal(await result, "ab");
+  });
+
+  it("rejects on Ctrl-C", async () => {
+    const input = makeFakeInput();
+    const output = makeFakeOutput();
+    const result = otp.prompt.password("Password: ", { input, output });
+    input.emit("data", "abc\u0003");
+    await rejects(() => result, { code: "SIGINT" });
+  });
+
+  it("enables and disables raw mode on a tty input", async () => {
+    const input = makeFakeInput({ isTTY: true });
+    let rawMode;
+    input.setRawMode = (v) => {
+      rawMode = v;
+    };
+    const output = makeFakeOutput();
+    const result = otp.prompt.password("Password: ", { input, output });
+    equal(rawMode, true);
+    input.emit("data", "x\n");
+    await result;
+    equal(rawMode, false);
+  });
+
 });
 
 describe("hasCommand", () => {
@@ -1348,6 +1413,7 @@ describe("main", () => {
     try {
       await withTmpDir(async (dir) => {
         const log = t.mock.method(console, "log", () => {});
+        const password = t.mock.method(otp.prompt, "password", async () => "hunter2");
         const env = makeEnv(dir);
         await otp.main(
           ["--home", dir, "add", "svc", `otpauth://totp/svc?secret=${secret}`],
@@ -1356,23 +1422,25 @@ describe("main", () => {
 
         const exportFile = join(dir, "export.bin");
         log.mock.resetCalls();
-        await otp.main(["--home", dir, "export", "hunter2", exportFile], env);
+        await otp.main(["--home", dir, "export", exportFile], env);
         ok(
           log.mock.calls[0].arguments[0].includes(`Exported to ${exportFile}`),
         );
         ok(existsSync(exportFile));
+        equal(password.mock.calls.length, 2);
+        equal(password.mock.calls[0].arguments[0], "Password: ");
+        equal(password.mock.calls[1].arguments[0], "Confirm password: ");
 
         const otherDir = join(dir, "other-home");
         log.mock.resetCalls();
-        await otp.main(
-          ["--home", otherDir, "import", exportFile, "hunter2"],
-          env,
-        );
+        password.mock.resetCalls();
+        await otp.main(["--home", otherDir, "import", exportFile], env);
         ok(
           log.mock.calls[0].arguments[0].includes(
             `Imported from ${exportFile}`,
           ),
         );
+        equal(password.mock.calls.length, 1);
 
         log.mock.resetCalls();
         await otp.main(["--home", otherDir], env);
@@ -1381,5 +1449,26 @@ describe("main", () => {
     } finally {
       process.stdout.isTTY = originalIsTTY;
     }
+  });
+
+  it("aborts export when the password confirmation doesn't match", async (t) => {
+    await withTmpDir(async (dir) => {
+      t.mock.method(process, "exit", () => {
+        throw new Error("exit");
+      });
+      t.mock.method(process.stderr, "write", () => true);
+      let call = 0;
+      t.mock.method(otp.prompt, "password", async () =>
+        call++ === 0 ? "hunter2" : "different",
+      );
+      const env = makeEnv(dir);
+      const exportFile = join(dir, "export.bin");
+      await rejects(
+        () => otp.main(["--home", dir, "export", exportFile], env),
+        /exit/,
+      );
+      equal(process.exit.mock.calls[0].arguments[0], 1);
+      ok(!existsSync(exportFile));
+    });
   });
 });
