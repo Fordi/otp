@@ -1,0 +1,23 @@
+{
+  "name": "otp",
+  "version": "1.0.0",
+  "description": "`otp` is a tiny command-line app to store and evaluate OTP codes.",
+  "main": "index.js",
+  "scripts": {
+    "test": "c8 node --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Fordi/otp.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Fordi/otp/issues"
+  },
+  "homepage": "https://github.com/Fordi/otp#readme",
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "c8": "^12.0.0"
+  }
+}

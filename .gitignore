@@ -1,2 +1,4 @@
 pages
 otp-*
+coverage
+node_modules

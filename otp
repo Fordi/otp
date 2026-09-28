@@ -1,16 +1,19 @@
 #!/usr/bin/env -S node --no-warnings=ExperimentalWarning
-import { spawnSync } from "node:child_process";
+import { spawnSync as _spawnSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { chmod, readFile, stat, writeFile } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const encode = TextEncoder.prototype.encode.bind(new TextEncoder());
-const decode = TextDecoder.prototype.decode.bind(new TextDecoder());
-const getRandomValues = crypto.getRandomValues.bind(crypto);
-const { subtle } = crypto;
+// Exposed for testing.
+export const proc = { spawnSync: _spawnSync };
 
-class SecretServiceSecret {
+export const encode = TextEncoder.prototype.encode.bind(new TextEncoder());
+export const decode = TextDecoder.prototype.decode.bind(new TextDecoder());
+export const getRandomValues = crypto.getRandomValues.bind(crypto);
+export const { subtle } = crypto;
+
+export class SecretServiceSecret {
   #attributes;
   #label;
   constructor(attributes, label) {
@@ -29,7 +32,7 @@ class SecretServiceSecret {
       .filter((a) => a !== undefined);
   }
   async read() {
-    const cp = spawnSync(
+    const cp = proc.spawnSync(
       "secret-tool",
       ["lookup", ...this.#attributes.flat()],
       { encoding: "utf8" },
@@ -46,21 +49,21 @@ class SecretServiceSecret {
   }
   async write(secret) {
     const input = Buffer.from(secret).toString("base64url");
-    const cp = spawnSync(
+    const cp = proc.spawnSync(
       "secret-tool",
       ["store", `--label="${this.#label ?? ""}"`, ...this.#attributes.flat()],
       { encoding: "utf8", input },
     );
     if (cp.status !== 0) {
       throw new Error(
-        `Couldn't write secret "${this.#label}" with attributes: \n${entries.map(([key, value]) => `  ${key}="${value}"`)}`,
+        `Couldn't write secret "${this.#label}" with attributes: \n${this.#attributes.map(([key, value]) => `  ${key}="${value}"`)}`,
       );
     }
     return;
   }
 }
 
-class WindowsSecureStringSecret {
+export class WindowsSecureStringSecret {
   #path;
   constructor(path) {
     this.#path = path;
@@ -71,9 +74,13 @@ class WindowsSecureStringSecret {
       "ConvertFrom-SecureString -AsPlainText",
     ].join(" | ");
 
-    const cp = spawnSync("powershell", ["-NoProfile", `-Command`, psCommand], {
-      encoding: "utf8",
-    });
+    const cp = proc.spawnSync(
+      "powershell",
+      ["-NoProfile", `-Command`, psCommand],
+      {
+        encoding: "utf8",
+      },
+    );
     if (cp.status !== 0) {
       throw Object.assign(new Error(`Couldn't read secret ${this.#path}`), {
         code: "ENOENT",
@@ -88,9 +95,13 @@ class WindowsSecureStringSecret {
       "ConvertTo-SecureString -AsPlainText -Force",
       `Export-CliXml -Path ${JSON.stringify(this.#path)}`,
     ].join(" | ");
-    const cp = spawnSync("powershell", ["-NoProfile", `-Command`, psCommand], {
-      encoding: "utf8",
-    });
+    const cp = proc.spawnSync(
+      "powershell",
+      ["-NoProfile", `-Command`, psCommand],
+      {
+        encoding: "utf8",
+      },
+    );
     if (cp.status !== 0) {
       throw new Error(`Couldn't write secret "${this.#path}"`);
     }
@@ -99,7 +110,7 @@ class WindowsSecureStringSecret {
   }
 }
 
-const encrypt = async (key, bytes) => {
+export const encrypt = async (key, bytes) => {
   const iv = getRandomValues(new Uint8Array(12));
   return [
     iv,
@@ -116,7 +127,7 @@ const encrypt = async (key, bytes) => {
   ];
 };
 
-const decrypt = async (key, [iv, encrypted] = []) =>
+export const decrypt = async (key, [iv, encrypted] = []) =>
   !iv
     ? undefined
     : await subtle.decrypt(
@@ -128,20 +139,15 @@ const decrypt = async (key, [iv, encrypted] = []) =>
         encrypted,
       );
 
-const APP_SECRET = "So, I really hate TOTP apps, turns out.";
-const getUserHash = async (user, uid) =>
+export const APP_SECRET = "So, I really hate TOTP apps, turns out.";
+export const getUserHash = async (user, uid) =>
   crypto.subtle.digest("SHA-256", encode(`${user}:${uid}:${APP_SECRET}`));
-const toBase64 = (u8) =>
-  u8.toBase64
-    ? u8.toBase64({ omitPadding: true, alphabet: "base64url" })
-    : Buffer.from(u8).toString("base64url");
+export const toBase64 = (u8) => Buffer.from(u8).toString("base64url");
 
-const fromBase64 = (str) =>
-  Uint8Array.fromBase64
-    ? Uint8Array.fromBase64(str)
-    : new Uint8Array(Buffer.from(str, "base64url"));
+export const fromBase64 = (str) =>
+  new Uint8Array(Buffer.from(str, "base64url"));
 
-class BinarySecret {
+export class BinarySecret {
   #file;
   #user;
   #uid;
@@ -176,7 +182,7 @@ class BinarySecret {
   }
 }
 
-class SecretManager {
+export class SecretManager {
   #secretService;
   #file;
   #open() {
@@ -220,7 +226,8 @@ class SecretManager {
       (HOME && basename(HOME)) ??
       (USERPROFILE && basename(USERPROFILE)) ??
       "root";
-    const home = HOME ?? USERPROFILE ?? (user === "root" ? "/root" : `/home/${user}`);
+    const home =
+      HOME ?? USERPROFILE ?? (user === "root" ? "/root" : `/home/${user}`);
     const local = flagHome ?? join(home, ".local");
     mkdirSync(local, { recursive: true });
     const keyFile = join(local, `${appName}.key`);
@@ -242,6 +249,9 @@ class SecretManager {
       this.#secretService = new WindowsSecureStringSecret(keyFile);
     }
     this.#file = storeFile;
+  }
+  get secretService() {
+    return this.#secretService;
   }
   async getSecret() {
     try {
@@ -285,7 +295,7 @@ class SecretManager {
   }
 }
 
-const fromBase32 = Object.assign(
+export const fromBase32 = Object.assign(
   (str) =>
     str &&
     new Uint8Array(
@@ -316,7 +326,7 @@ Object.assign(
   ),
 );
 
-function padCounter(counter) {
+export function padCounter(counter) {
   const array = new Uint8Array(8).fill(0);
   counter = counter.toString(16).padStart(16, "0");
   let byte = 0;
@@ -327,7 +337,7 @@ function padCounter(counter) {
   return array;
 }
 
-function truncate(hmac, digits) {
+export function truncate(hmac, digits) {
   const offset = hmac[hmac.length - 1] & 0x0f;
   const value =
     ((hmac[offset + 0] & 0x7f) << 24) |
@@ -336,7 +346,59 @@ function truncate(hmac, digits) {
     (hmac[offset + 3] & 0xff);
   return value % 10 ** digits;
 }
-const otp = async (url) => {
+export const isOtpUrl = (url) => {
+  try {
+    url = url instanceof URL ? url : new URL(url);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "otpauth:") {
+    return false;
+  }
+  const type = url.hostname.toLowerCase();
+  if (type !== "totp" && type !== "hotp") {
+    return false;
+  }
+  if (!fromBase32.is(url.searchParams.get("secret") ?? "")) {
+    return false;
+  }
+  if (url.searchParams.has("digits")) {
+    const digits = url.searchParams.get("digits");
+    if (!/^\d+$/.test(digits) || Number(digits) < 1) {
+      return false;
+    }
+  }
+  if (url.searchParams.has("algorithm")) {
+    if (!/^(sha)-?(1|256|384|512)$/i.test(url.searchParams.get("algorithm"))) {
+      return false;
+    }
+  }
+  if (type === "totp") {
+    if (url.searchParams.has("counter")) {
+      return false;
+    }
+    if (url.searchParams.has("period")) {
+      const period = url.searchParams.get("period");
+      if (!/^\d+$/.test(period) || Number(period) < 1) {
+        return false;
+      }
+    }
+  }
+  if (type === "hotp") {
+    if (url.searchParams.has("period")) {
+      return false;
+    }
+    if (url.searchParams.has("counter")) {
+      const counter = url.searchParams.get("counter");
+      if (!/^\d+$/.test(counter)) {
+        return false;
+      }
+    }
+  }
+  return true;
+};
+
+export const otp = async (url) => {
   url = url instanceof URL ? url : new URL(url);
   const type = url.hostname.toLowerCase() === "totp" ? "totp" : "hotp";
   const period =
@@ -348,8 +410,7 @@ const otp = async (url) => {
       ? Math.floor(Date.now() / 1000 / period)
       : parseInt(url.searchParams.get("counter") ?? 0),
   );
-  const secret =
-    fromBase32(url.searchParams.get("secret")) || new Uint8Array([]);
+  const secret = fromBase32(url.searchParams.get("secret"));
   const digits = parseInt(url.searchParams.get("digits") ?? 6);
   const algorithm = [
     ...((url.searchParams.get("algorithm") ?? "sha1").match(
@@ -370,7 +431,7 @@ const otp = async (url) => {
   return String(truncate(new Uint8Array(hmac), digits)).padStart(digits, "0");
 };
 
-const usage = async (level = 0, msg) => {
+export const usage = async (level = 0, msg) => {
   const short = level !== 0;
   const stream = process.stderr;
   const randomSecret = fromBase32.random(1);
@@ -425,18 +486,17 @@ const usage = async (level = 0, msg) => {
   process.exit(level);
 };
 
-const clip = (text) =>
-  spawnSync("xclip", ["-selection", "clipboard"], {
+export const clip = (text) =>
+  proc.spawnSync("xclip", ["-selection", "clipboard"], {
     input: text,
     encoding: "utf-8",
     stdio: ["pipe", "ignore", "ignore"],
   });
 
-const flagsDefault = process.stdout.isTTY
-  ? { clipboard: true }
-  : { stdout: true };
+export const flagsDefault = () =>
+  process.stdout.isTTY ? { clipboard: true } : { stdout: true };
 
-async function update() {
+export async function update() {
   await writeFile(
     process.argv[1],
     await fetch(
@@ -446,9 +506,9 @@ async function update() {
   process.exit();
 }
 
-async function parseArgs(args) {
+export async function parseArgs(args) {
   const commands = [];
-  let flags = { ...flagsDefault };
+  let flags = { ...flagsDefault() };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg[0] === "-" && arg[1] !== "-") {
@@ -483,11 +543,11 @@ async function parseArgs(args) {
     switch (arg) {
       case "add":
         commands.push(["add", args[++i], args[++i], flags]);
-        flags = { ...flagsDefault };
+        flags = { ...flagsDefault() };
         break;
       case "code":
         commands.push(["code", args[++i], undefined, flags]);
-        flags = { ...flagsDefault };
+        flags = { ...flagsDefault() };
         break;
       case "--clip":
         flags.clipboard = !flags.clipboard;
@@ -510,7 +570,7 @@ async function parseArgs(args) {
           await usage(1, `Unknown flag: ${arg}`);
         }
         commands.push(["implicit", arg, undefined, flags]);
-        flags = { ...flagsDefault };
+        flags = { ...flagsDefault() };
         break;
     }
   }
@@ -520,49 +580,41 @@ async function parseArgs(args) {
   return commands;
 }
 
-const logAndClipCode = async (url, flags) => {
+export const logAndClipCode = async (url, flags) => {
   const code = await otp(url instanceof URL ? url.toString() : url);
   if (flags.stdout) console.log(code);
   if (flags.clipboard) clip(code);
 };
 
-const urlFromSecret = (secret) => {
+export const urlFromSecret = (secret) => {
   const url = new URL("otpauth://totp/anon");
   url.searchParams.set("secret", secret);
   return url;
 };
 let store;
 
-async function main(args, env) {
+export async function main(args, env) {
   const commands = await parseArgs(args);
 
   for (let [command, name, value, flags] of commands) {
     switch (command) {
       case "add":
-        try {
-          store = new SecretManager("org.fordi.otp", env, flags);
-          store.set(name, new URL(value).toString());
+        store = new SecretManager("org.fordi.otp", env, flags);
+        if (isOtpUrl(value)) {
+          await store.set(name, new URL(value).toString());
           if (flags.stdout) console.log(`Stored ${name}`);
-        } catch (e) {
-          if (e.code === "ERR_INVALID_URL") {
-            if (fromBase32.is(value)) {
-              store.set(name, urlFromSecret(value).toString());
-              break;
-            }
-            e.message += " and doesn't parse as a simple secret";
-          }
-          await usage(1, e.message);
+        } else if (fromBase32.is(value)) {
+          await store.set(name, urlFromSecret(value).toString());
+        } else {
+          await usage(1, `"${value}" is not a valid OTP URL or secret`);
         }
         break;
       case "code":
       case "implicit":
         store = new SecretManager("org.fordi.otp", env, flags);
-        try {
+        if (isOtpUrl(name)) {
           await logAndClipCode(new URL(name), flags);
-        } catch (e) {
-          if (e.code !== "ERR_INVALID_URL") {
-            await usage(1, e.message);
-          }
+          break;
         }
         const url = await store.get(name);
         if (!url) {
@@ -586,4 +638,6 @@ async function main(args, env) {
   }
 }
 
-main(process.argv.slice(2), process.env).catch((e) => console.error(e));
+if (process.argv[1] === import.meta.filename) {
+  main(process.argv.slice(2), process.env).catch((e) => console.error(e));
+}

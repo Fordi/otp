@@ -1,0 +1,7 @@
+{
+  "all": true,
+  "include": ["otp"],
+  "exclude": ["test/**"],
+  "extension": [".js", ".cjs", ".mjs", ".ts", ".tsx", ".jsx", ""],
+  "reporter": ["html", "text"]
+}

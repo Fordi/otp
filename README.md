@@ -2,6 +2,10 @@
 
 `otp` is a tiny command-line app to store and evaluate OTP codes.
 
+Test coverage is available at https://fordi.github.io/otp/coverage/index.html
+
+
+
 ## Installation
 
 ```sh

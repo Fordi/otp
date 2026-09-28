@@ -18,3 +18,4 @@ npx -y --package=markdown-to-html-cli markdown-to-html README.md --output pages
     tail +2 otp
   ) | gzip -9
 ) > pages/install
+cp -dpR coverage pages
