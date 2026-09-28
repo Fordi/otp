@@ -224,12 +224,12 @@ class SecretManager {
     mkdirSync(join(home, ".local"), { recursive: true });
     const keyFile = join(home, ".local", `${appName}.key`);
     const storeFile = join(home, ".local", `${appName}.store`);
-    if (XDG_SESSION_TYPE === "tty") {
+    if (XDG_SESSION_TYPE === "tty" || !XDG_SESSION_TYPE) {
       this.#secretService = new BinarySecret(keyFile, user, UID ?? 0);
     } else if (DBUS_SESSION_BUS_ADDRESS) {
       this.#secretService = new SecretServiceSecret({ domain: appName });
     } else {
-      this.#secretService = WindowsSecureStringSecret(keyFile);
+      this.#secretService = new WindowsSecureStringSecret(keyFile);
     }
     this.#file = join(HOME, storeFile);
   }
