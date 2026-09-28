@@ -1,6 +1,6 @@
 #!/usr/bin/env -S node --no-warnings=ExperimentalWarning
 import { spawnSync as _spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, renameSync } from "node:fs";
 import { chmod, readFile, stat, writeFile } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -773,6 +773,9 @@ export async function main(args, env) {
   }
 }
 
-if (process.argv[1] === import.meta.filename) {
+if (
+  process.argv[1] &&
+  realpathSync(process.argv[1]) === import.meta.filename
+) {
   main(process.argv.slice(2), process.env).catch((e) => console.error(e));
 }
