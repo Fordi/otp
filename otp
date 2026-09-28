@@ -587,13 +587,14 @@ export const clip = (text) => {
 export const flagsDefault = () =>
   process.stdout.isTTY ? { clipboard: true } : { stdout: true };
 
-export async function update() {
-  await writeFile(
-    process.argv[1],
-    await fetch(
-      "https://raw.githubusercontent.com/Fordi/otp/refs/heads/main/otp",
-    ).then((r) => r.body),
-  );
+const SOURCE =
+  "https://raw.githubusercontent.com/Fordi/otp/refs/heads/main/otp";
+
+export async function update({ verbose } = {}) {
+  if (verbose) {
+    process.stderr.write(`Updating from ${SOURCE}`);
+  }
+  await writeFile(process.argv[1], await fetch(SOURCE).then((r) => r.body));
   process.exit();
 }
 
@@ -621,7 +622,7 @@ export async function parseArgs(args) {
             flags.home = args[++i];
             break;
           case "u":
-            await update();
+            await update(flags);
           case "v":
             flags.verbose = (flags.verbose ?? 0) + 1;
             break;
@@ -649,7 +650,7 @@ export async function parseArgs(args) {
       case "--help":
         await usage();
       case "--update":
-        await update();
+        await update(flags);
       case "--verbose":
         flags.verbose = (flags.verbose ?? 0) + 1;
         break;
