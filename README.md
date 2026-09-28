@@ -80,6 +80,7 @@ but makes damn certain it's not in cleartext.
 ## Examples
 
 ```sh
+$ # None of these are real secrets
 $ otp add npm otpauth://totp/npm:fordi?secret=U2AN7MKZ5U6ZQVCBLOQYRPKI6D6MRT5A&issuer=npm
 $ otp code npm # code for npm is now on your clipboard
 $ otp code -cs npm # or just `otp -cs npm`
