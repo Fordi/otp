@@ -78,14 +78,7 @@ otp [([flags] command|{name|url|secret})]...
 
 ## Storage
 
-OTP URLs are stored in `${HOME}/.local/org.fordi.otp.store`, as an SQLite3 database,
-and are encrypted with a secret key; the key is in your DBUS secret service,
-Windows credentials manager, OS-X Keyring or, failing all of those, the
-file `${HOME}/.local/org.fordi.otp`, itself encrypted with a hash of
-`$USER:$UID:{APP_SECRET}`.
-
-That last one ain't much, really - someone with local root could probably figure it out,
-but makes damn certain it's not in cleartext.
+OTP URLs are stored in `${HOME}/.local/org.fordi.otp.store`, as an SQLite3 database, and are encrypted with a secret key; the key is in your DBUS secret service, stored as a Windows Secure String (in `%USERPROFILE%/.local/org.fordi.otp.key`), your OS-X Keyring or, failing all of those, the file `${HOME}/.local/org.fordi.otp`, itself encrypted with a hash of `$USER:$UID:{APP_SECRET}`.
 
 ## Examples
 
@@ -94,13 +87,13 @@ $ # None of these are real secrets
 $ otp add npm otpauth://totp/npm:coolfellow?secret=ABCDEFGHIJKLMNOPQRSTUVWXYZ234567&issuer=npm
 $ otp code npm # code for npm is now on your clipboard
 $ otp code -cs npm # or just `otp -cs npm`
-623009
+465832
 $ otp list # or just `otp`
 | Name   | Type | Issuer | Account    |
 | ------ | ---- | ------ | ---------- |
 | npm    | totp | npm    | coolfellow |
 | github | totp | GitHub | jiveguy    |
 $ otp -cs code 234567ABCDEFGHIJ # or otp -cs 234567ABCDEFGHIJ
-331308
+219835
 $ npm publish --access=public --otp=$(otp npm) # command-line publish without the fuss
 ```
