@@ -9,7 +9,10 @@ import { gzipSync, gunzipSync } from "node:zlib";
 // Exposed for testing.
 export const proc = { spawnSync: _spawnSync };
 
-const _promptPassword = (promptText, { input = process.stdin, output = process.stdout } = {}) =>
+const _promptPassword = (
+  promptText,
+  { input = process.stdin, output = process.stdout } = {},
+) =>
   new Promise((resolve, reject) => {
     output.write(promptText);
     let password = "";
@@ -27,7 +30,9 @@ const _promptPassword = (promptText, { input = process.stdin, output = process.s
         }
         if (char === "\u0003") {
           cleanup();
-          reject(Object.assign(new Error("Prompt cancelled"), { code: "SIGINT" }));
+          reject(
+            Object.assign(new Error("Prompt cancelled"), { code: "SIGINT" }),
+          );
           return;
         }
         if (char === "\u007f" || char === "\b") {
@@ -343,9 +348,7 @@ export class SecretManager {
     );
     const listKeys = store.prepare("SELECT key FROM store ORDER BY key ASC");
     const deleteByKey = store.prepare("DELETE FROM store WHERE key = ?");
-    const renameKey = store.prepare(
-      "UPDATE store SET key = ? WHERE key = ?",
-    );
+    const renameKey = store.prepare("UPDATE store SET key = ? WHERE key = ?");
     return {
       get: (key) => {
         const { iv, encrypted } = getValueByKey.get(key) ?? {};
@@ -509,8 +512,14 @@ export class SecretManager {
       entries[name] = await this.get(name);
     }
     const json = gzipSync(encode(JSON.stringify(entries)), { level: 9 });
-    const [iv, encrypted] = await encrypt(await getPasswordHash(password), json);
-    await writeFile(file, Buffer.concat([Buffer.from(iv), Buffer.from(encrypted)]));
+    const [iv, encrypted] = await encrypt(
+      await getPasswordHash(password),
+      json,
+    );
+    await writeFile(
+      file,
+      Buffer.concat([Buffer.from(iv), Buffer.from(encrypted)]),
+    );
   }
 
   async import(getPassword, file) {
@@ -742,42 +751,329 @@ export const markdownTable = (rows) => {
   );
 };
 
+export class HelpNonError extends Error {
+  ok = true;
+  silent = false;
+  constructor(msg = "") {
+    super(msg);
+  }
+}
+
+export class UpdateCompleteNonError extends Error {
+  ok = true;
+  silent = true;
+  constructor(msg = "") {
+    super(msg);
+  }
+}
+
+const INDENT = "  ";
+function indent(text, skipFirst = false) {
+  return `${skipFirst ? "" : INDENT}${text.split("\n").join(`\n${INDENT}`)}`;
+}
+let footnote = 1;
+const processCommandSet = (set) =>
+  Object.entries(set).reduce(
+    (obj, [name, [aliases, execute, description, extra]]) => {
+      const info = {
+        execute,
+        arity: Math.max(0, execute.length - 1),
+        name,
+        aliases: [name, ...aliases],
+        description: `${description}${extra ? `[^${footnote}]` : ""}`,
+        ...(extra ? { extra: `[^${footnote}]: ${indent(extra, true)}` } : {}),
+      };
+      obj[name] = info;
+      for (const shorthand of aliases) {
+        if (shorthand === "") {
+          obj[shorthand] = { ...info, blank: true };
+        } else {
+          obj[shorthand] = info;
+        }
+      }
+      return obj;
+    },
+    { "": [] },
+  );
+
+const clipCommands = {
+  win32: ["clip", []],
+  darwin: ["pbcopy", []],
+};
+
+export const clip = (text) => {
+  const [cmd, args] =
+    clipCommands[process.platform] ??
+    (process.env.WAYLAND_DISPLAY
+      ? ["wl-copy", []]
+      : ["xclip", ["-selection", "clipboard"]]);
+  return proc.spawnSync(cmd, args, {
+    input: text,
+    encoding: "utf-8",
+    stdio: ["pipe", "ignore", "ignore"],
+  });
+};
+
+export const flagsDefault = () =>
+  process.stdout.isTTY ? { clipboard: true } : { stdout: true };
+
+const SOURCE =
+  "https://raw.githubusercontent.com/Fordi/otp/refs/heads/main/otp";
+
+export async function update({ verbose } = {}) {
+  if (verbose) {
+    process.stderr.write(`Updating from ${SOURCE}`);
+  }
+  await writeFile(process.argv[1], await fetch(SOURCE).then((r) => r.body));
+  throw new UpdateCompleteNonError();
+}
+
+const flipFlag =
+  (name) =>
+  ({ flags, ...rest }) => ({
+    ...rest,
+    flags: { ...flags, [name]: !flags[name] },
+  });
+const takeFlag =
+  (name) =>
+  ({ flags, ...rest }, arg) => ({ ...rest, flags: { ...flags, [name]: arg } });
+const incrementFlag =
+  (name) =>
+  ({ flags, ...rest }) => ({
+    ...rest,
+    flags: { ...flags, [name]: (flags[name] ?? 0) + 1 },
+  });
+const _ = undefined;
+
+// command: [aliases, action]
+const COMMANDS = processCommandSet({
+  add: [
+    ["+"],
+    async ({ flags, store }, name, url) => {
+      if (isOtpUrl(url)) {
+        await store.set(name, new URL(url).toString());
+        if (flags.stdout) console.log(`Stored ${name}`);
+      } else if (fromBase32.is(url)) {
+        await store.set(name, urlFromSecret(url).toString());
+      } else {
+        throw new Error(`"${url}" is not a valid OTP URL or secret`);
+      }
+    },
+    "Add a named OTP"
+  ],
+  code: [
+    [""],
+    async ({ flags, store }, name) => {
+      if (isOtpUrl(name)) {
+        return await logAndClipCode(new URL(name), flags);
+      }
+      const url = await store.get(name);
+      if (!url) {
+        if (fromBase32.is(name)) {
+          return await logAndClipCode(urlFromSecret(name), flags);
+        }
+        throw new Error(`No code named ${name}`);
+      }
+      return await logAndClipCode(url, flags);
+    },
+    "Generate a code"
+  ],
+  delete: [
+    ["-", "rm"],
+    async ({ flags, store }, name) => {
+      if (await store.delete(name)) {
+        if (flags.stdout) console.log(`Deleted ${name}`);
+      } else {
+        throw new Error(`No code named ${name}`);
+      }
+    },
+    "Delete a named OTP"
+  ],
+  rename: [
+    ["mv", "r"],
+    async ({ flags, store }, name, newName) => {
+      const renamed = await store.rename(name, newName);
+      if (renamed) {
+        if (flags.stdout) {
+          console.log(`Renamed ${name} to ${newName}`);
+        }
+      } else {
+        throw new Error(`No code named ${name}`);
+      }
+    },
+    "Rename a stored OTP"
+  ],
+  list: [
+    ["default", "ls"],
+    async ({ flags, store }) => {
+      const keys = await store.list();
+      if (!keys.length) {
+        process.stderr.write(`No OTPs in the store\n`);
+        return;
+      }
+      if (flags.stdout) {
+        console.log(keys.join("\n"));
+        return;
+      }
+      const rows = await Promise.all(
+        keys.map(async (key) => {
+          const { type, issuer, account } = parseOtpUrl(await store.get(key));
+          return [
+            key,
+            type,
+            issuer ?? "",
+            account === ANONYMOUS_NO_ACCOUNT ? "" : account,
+          ];
+        }),
+      );
+      console.log(
+        markdownTable([["Name", "Type", "Issuer", "Account"], ...rows]),
+      );
+    },
+    "List the OTPs in your store (the default)"
+  ],
+  export: [
+    ["x"],
+    async ({ flags, store }, filename) => {
+      if (filename.startsWith("-")) {
+        throw new Error("filename cannot look like a flag");
+      }
+      if (flags.unencrypted && !process.stdin.isTTY) {
+        throw new Error(
+          "--unencrypted requires an interactive terminal to confirm",
+        );
+      }
+      let password;
+      if (flags.unencrypted) {
+        const confirmed = await prompt.password(
+          "This will write your OTP secrets in PLAIN TEXT. Type 'yes' to continue: ",
+        );
+        if (confirmed.trim().toLowerCase() !== "yes") {
+          throw new Error("Export cancelled");
+        }
+        password = undefined;
+      } else if (process.stdin.isTTY) {
+        password = await prompt.password("Password: ");
+        if (!password) {
+          const confirmed = await prompt.password(
+            "This will write your OTP secrets in PLAIN TEXT. Type 'yes' to continue: ",
+          );
+          if (confirmed.trim().toLowerCase() !== "yes") {
+            throw new Error("Export cancelled");
+          }
+        } else {
+          const confirm = await prompt.password("Confirm password: ");
+          if (password !== confirm) {
+            throw new Error("Passwords didn't match");
+          }
+        }
+      } else {
+        password = await prompt.password("");
+      }
+      await store.export(password, filename);
+      if (flags.stdout) console.log(`Exported to ${filename}`);
+    },
+    "Export the store to an encrypted, gzipped file"
+  ],
+  import: [
+    ["i"],
+    async ({ flags, store }, filename) => {
+      const getPassword = () =>
+        prompt.password(process.stdin.isTTY ? "Password: " : "");
+      const { added, updated } = await store.import(getPassword, filename);
+      if (flags.stdout) {
+        console.log(`Imported from ${filename}`);
+        for (const n of added) console.log(`  added: ${n}`);
+        for (const n of updated) console.log(`  updated: ${n}`);
+      } else if (added.length || updated.length) {
+        console.log(
+          markdownTable([
+            ["Name", "Status"],
+            ...added.map((n) => [n, "added"]),
+            ...updated.map((n) => [n, "updated"]),
+          ]),
+        );
+      }
+    },
+    "Import OTPs from a file made with `export`"
+  ],
+});
+
+const FLAGS = processCommandSet({
+  clip: [["c"], flipFlag("clipboard"), "toggle clipboard"],
+  stdout: [["s"], flipFlag("stdout"), "toggle stdout output"],
+  help: [
+    ["h", "?"],
+    async () => {
+      throw new HelpNonError();
+    },
+    "print this and exit",
+  ],
+  home: [["H"], takeFlag("home"), "use a home directory other than `~/.local`"],
+  update: [["u"], update, "update from GitHub"],
+  verbose: [["v"], incrementFlag("verbose"), "say more"],
+  unencrypted: [
+    [],
+    flipFlag("unencrypted"),
+    "export in plain text",
+    "`export` only; requires a tty, prompts to confirm",
+  ],
+});
+
+const byUniqueNameAsc = (a, b) =>
+  a.name.toLowerCase() > b.name.toLowerCase() ? 1 : -1;
+const elideShort = new Set(["home", "update", "verbose", "encrypted", "import", "export"]);
+
+const argsOf = (fn) => {
+  let argList = fn.toString().match(/\((.*?)\)/)[1];
+  argList = argList.replace(/=>.*$/, '');
+  argList = argList.replace(/^\{.*\}/, 'context');
+  argList = argList.split(/, ?/);
+  return argList.slice(1);
+}
+
 export const usage = async (level = 0, msg) => {
   const short = level !== 0;
   const stream = process.stderr;
   const randomSecret = "234567ABCDEFGHIJ";
   const mockUrl = `otpauth://totp/npm:coolfellow?secret=ABCDEFGHIJKLMNOPQRSTUVWXYZ234567&issuer=npm`;
+  const flagData = Object.entries(FLAGS)
+    .filter(([key, info]) => info.name === key && (!short || !elideShort.has(info.name)))
+    .map(([key, info]) => info)
+    .sort(byUniqueNameAsc);
+  const commandData = Object.entries(COMMANDS)
+    .filter(([key, info]) => info.name === key && (!short || !elideShort.has(info.name)))
+    .map(([key, info]) => info)
+    .sort(byUniqueNameAsc);
+  const flagInfo = [
+    ["Flag", "Description"],
+    ...flagData.map(({ aliases, description, execute }) => [
+      `${aliases.map((a) => (a.length > 1 ? `\`--${a}\`` : `\`-${a}\``)).join("/")} ${argsOf(execute).map((a) => `{${a}}`).join(' ')}`,
+      description ?? "",
+    ]),
+  ];
+  const commandInfo = [
+    ["Command", "Description"],
+    ...commandData.map(({ aliases, description, execute }) => [
+      `${aliases.map((a) => `\`${a}\``).join("/")} ${argsOf(execute).map((a) => `{${a}}`).join(' ')}`,
+      description ?? "",
+    ]),
+  ];
+  const extraInfo = flagData
+    .map(({ extra }) => (extra ? `- ${extra}` : false))
+    .filter(Boolean);
   stream.write(
     [
       msg && `**${msg}**`,
       `## Usage`,
-      '',
+      "",
       "```",
       `${basename(process.argv[1])} [([flags] command|{name|url|secret})]...`,
       "```",
-      '',
+      "",
       `## Flags`,
       "",
-      markdownTable([
-        ["Flag", "Description"],
-        ["`--clip` / `-c`", "toggle clipboard"],
-        ["`--stdout` / `-s`", "toggle stdout output"],
-        ["`--help` / `-h`", "print this and exit"],
-        ...(short
-          ? []
-          : [
-              [
-                "`--home` / `-H {home}`",
-                "use a home directory other than `~/.local`",
-              ],
-              ["`--update` / `-u`", "update from GitHub"],
-              ["`--verbose` / `-v`", "say more"],
-              [
-                "`--unencrypted`",
-                "export in plain text †",
-              ],
-            ]),
-      ]),
+      markdownTable(flagInfo),
       ...(short
         ? []
         : [
@@ -785,21 +1081,12 @@ export const usage = async (level = 0, msg) => {
             "- the default for a tty is clipboard, no stdout",
             "- the default for a pipe is stdout, no clipboard",
             "- to flip both at once, use `-cs`",
-            "- † `export` only; requires a tty, prompts to confirm",
+            ...extraInfo,
           ]),
       "",
       `## Commands`,
       "",
-      markdownTable([
-        ["Command", "Description"],
-        ["`list`", "List the OTPs in your store (the default)"],
-        ["`add {name} {url\\|secret}`", "Add a named OTP"],
-        ["`code {name\\|url\\|secret}`", "Generate a code"],
-        ["`delete {name}`", "Delete a named OTP"],
-        ["`rename {currentName} {newName}`", "Rename a stored OTP"],
-        ["`export {filename}`", "Export the store to an encrypted, gzipped file"],
-        ["`import {filename}`", "Import OTPs from a file made with `export`"],
-      ]),
+      markdownTable(commandInfo),
       ...(short
         ? []
         : [
@@ -846,134 +1133,95 @@ export const usage = async (level = 0, msg) => {
   process.exit(level);
 };
 
-const clipCommands = {
-  win32: ["clip", []],
-  darwin: ["pbcopy", []],
-};
-
-export const clip = (text) => {
-  const [cmd, args] =
-    clipCommands[process.platform] ??
-    (process.env.WAYLAND_DISPLAY
-      ? ["wl-copy", []]
-      : ["xclip", ["-selection", "clipboard"]]);
-  return proc.spawnSync(cmd, args, {
-    input: text,
-    encoding: "utf-8",
-    stdio: ["pipe", "ignore", "ignore"],
-  });
-};
-
-export const flagsDefault = () =>
-  process.stdout.isTTY ? { clipboard: true } : { stdio: true };
-
-const SOURCE =
-  "https://raw.githubusercontent.com/Fordi/otp/refs/heads/main/otp";
-
-export async function update({ verbose } = {}) {
-  if (verbose) {
-    process.stderr.write(`Updating from ${SOURCE}`);
+const handleCli = ({
+  arg,
+  prefix = "",
+  type,
+  name,
+  of,
+  allowArg = true,
+  allowShort = true,
+  args,
+}) => {
+  let desc = of[name] ?? of[""];
+  if (!desc || (!allowShort && desc.name !== name)) {
+    throw new Error(`Unknown ${type}: ${prefix}${name}`);
   }
-  await writeFile(process.argv[1], await fetch(SOURCE).then((r) => r.body));
-  process.exit();
-}
+
+  if (desc.arity !== 0 && !allowArg) {
+    throw new Error(`${type} ${prefix}${desc.name} must be last in group`);
+  }
+  const consumedArgs = args.splice(0, desc.arity);
+  if (desc.blank) {
+    consumedArgs.unshift(arg);
+  }
+  if (consumedArgs.length < desc.arity) {
+    throw new Error(
+      `${type} ${prefix}${desc.name} requires ${desc.arity} arguments, got ${consumedArgs.length}`,
+    );
+  }
+  return [desc, consumedArgs];
+};
 
 export async function parseArgs(args) {
-  const commands = [];
-  let flags = { ...flagsDefault() };
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg[0] === "-" && arg[1] !== "-") {
-      for (let j = 1; j < arg.length; j++) {
-        const a = arg[j];
-        switch (a) {
-          case "c":
-            flags.clipboard = !flags.clipboard;
-            break;
-          case "s":
-            flags.stdio = !flags.stdio;
-            break;
-          case "h":
-            await usage();
-          case "H":
-            if (j !== arg.length - 1) {
-              throw new Error("H must be last shorthanded single-arg");
-            }
-            flags.home = args[++i];
-            break;
-          case "u":
-            await update(flags);
-          case "v":
-            flags.verbose = (flags.verbose ?? 0) + 1;
-            break;
-          default:
-            await usage(1, `Unknown flag: -${a}`);
-        }
+  let context = { commands: [], flags: { ...flagsDefault() } };
+  const copy = [...args];
+  while (copy.length) {
+    const arg = copy.shift();
+    const d = arg.startsWith("-") && arg.length >= 2;
+    const dd = arg.startsWith("--");
+    if (d && !dd) {
+      for (let i = 1; i < arg.length; i++) {
+        const [desc, flagArgs] = handleCli({
+          arg,
+          args: copy,
+          prefix: "-",
+          type: "flag",
+          name: arg[i],
+          of: FLAGS,
+          allowArg: i === arg.length - 1,
+        });
+        context = await desc.execute(context, ...flagArgs);
       }
       continue;
     }
-    switch (arg) {
-      case "add":
-        commands.push(["add", args[++i], args[++i], flags]);
-        flags = { ...flagsDefault() };
-        break;
-      case "code":
-        commands.push(["code", args[++i], undefined, flags]);
-        flags = { ...flagsDefault() };
-        break;
-      case "delete":
-        commands.push(["delete", args[++i], undefined, flags]);
-        flags = { ...flagsDefault() };
-        break;
-      case "rename":
-        commands.push(["rename", args[++i], args[++i], flags]);
-        flags = { ...flagsDefault() };
-        break;
-      case "export":
-        commands.push(["export", args[++i], undefined, flags]);
-        flags = { ...flagsDefault() };
-        break;
-      case "import":
-        commands.push(["import", args[++i], undefined, flags]);
-        flags = { ...flagsDefault() };
-        break;
-      case "--clip":
-        flags.clipboard = !flags.clipboard;
-        break;
-      case "--stdout":
-        flags.stdio = !flags.stdio;
-        break;
-      case "--unencrypted":
-        flags.unencrypted = !flags.unencrypted;
-        break;
-      case "--help":
-        await usage();
-      case "--update":
-        await update(flags);
-      case "--verbose":
-        flags.verbose = (flags.verbose ?? 0) + 1;
-        break;
-      case "--home":
-        flags.home = args[++i];
-        break;
-      default:
-        if (arg.startsWith("--")) {
-          await usage(1, `Unknown flag: ${arg}`);
-        }
-        commands.push(["implicit", arg, undefined, flags]);
-        flags = { ...flagsDefault() };
-        break;
+    if (dd && arg.length > 3) {
+      const [desc, flagArgs] = handleCli({
+        arg,
+        args: copy,
+        prefix: "--",
+        type: "flag",
+        name: arg.slice(2).toLowerCase(),
+        of: FLAGS,
+        allowShort: false,
+      });
+      context = await desc.execute(context, ...flagArgs);
+      continue;
     }
+    const [desc, cmdArgs] = handleCli({
+      arg,
+      args: copy,
+      type: "command",
+      name: arg.toLowerCase(),
+      of: COMMANDS,
+      allowUnknown: true,
+    });
+    context.commands.push({
+      flags: { ...context.flags },
+      name: desc.name,
+      args: cmdArgs,
+    });
+    context.flags = flagsDefault();
   }
-  if (commands.length === 0) {
-    commands.push(["list", undefined, undefined, flags]);
+  if (context.commands.length === 0) {
+    return [{ name: COMMANDS.default.name, args: [], flags: context.flags }];
   }
-  return commands;
+  return context.commands;
 }
 
 export const logAndClipCode = async (url, flags) => {
   const code = await otp(url instanceof URL ? url.toString() : url);
-  if (flags.stdio) console.log(code);
+  if (flags.stdout) console.log(code);
   if (flags.clipboard) clip(code);
 };
 
@@ -987,155 +1235,21 @@ export const urlFromSecret = (secret) => {
 let store;
 
 export async function main(args, env) {
-  const commands = await parseArgs(args);
-
-  for (let [command, name, value, flags] of commands) {
-    switch (command) {
-      case "add":
-        store = new SecretManager("org.fordi.otp", env, flags);
-        if (isOtpUrl(value)) {
-          await store.set(name, new URL(value).toString());
-          if (flags.stdio) console.log(`Stored ${name}`);
-        } else if (fromBase32.is(value)) {
-          await store.set(name, urlFromSecret(value).toString());
-        } else {
-          await usage(1, `"${value}" is not a valid OTP URL or secret`);
-        }
-        break;
-      case "code":
-      case "implicit":
-        store = new SecretManager("org.fordi.otp", env, flags);
-        if (isOtpUrl(name)) {
-          await logAndClipCode(new URL(name), flags);
-          break;
-        }
-        const url = await store.get(name);
-        if (!url) {
-          if (fromBase32.is(name)) {
-            await logAndClipCode(urlFromSecret(name), flags);
-            break;
-          }
-          await usage(1, `No code named ${name}`);
-        }
-        await logAndClipCode(url, flags);
-        break;
-      case "delete":
-        store = new SecretManager("org.fordi.otp", env, flags);
-        if (await store.delete(name)) {
-          if (flags.stdio) console.log(`Deleted ${name}`);
-        } else {
-          await usage(1, `No code named ${name}`);
-        }
-        break;
-      case "rename":
-        store = new SecretManager("org.fordi.otp", env, flags);
-        try {
-          if (await store.rename(name, value)) {
-            if (flags.stdio) console.log(`Renamed ${name} to ${value}`);
-          } else {
-            await usage(1, `No code named ${name}`);
-          }
-        } catch (e) {
-          await usage(1, e.message);
-        }
-        break;
-      case "list": {
-        store = new SecretManager("org.fordi.otp", env, flags);
-        const keys = await store.list();
-        if (!keys.length) {
-          process.stderr.write(`No OTPs in the store\n`);
-          break;
-        }
-        if (flags.stdio) {
-          console.log(keys.join("\n"));
-          break;
-        }
-        const rows = await Promise.all(
-          keys.map(async (key) => {
-            const { type, issuer, account } = parseOtpUrl(await store.get(key));
-            return [
-              key,
-              type,
-              issuer ?? "",
-              account === ANONYMOUS_NO_ACCOUNT ? "" : account,
-            ];
-          }),
-        );
-        console.log(
-          markdownTable([["Name", "Type", "Issuer", "Account"], ...rows]),
-        );
-        break;
-      }
-      case "export": {
-        store = new SecretManager("org.fordi.otp", env, flags);
-        if (flags.unencrypted && !process.stdin.isTTY) {
-          await usage(
-            1,
-            "--unencrypted requires an interactive terminal to confirm",
-          );
-          break;
-        }
-        let password;
-        if (flags.unencrypted) {
-          const confirmed = await prompt.password(
-            "This will write your OTP secrets in PLAIN TEXT. Type 'yes' to continue: ",
-          );
-          if (confirmed.trim().toLowerCase() !== "yes") {
-            await usage(1, "Export cancelled");
-            break;
-          }
-          password = undefined;
-        } else if (process.stdin.isTTY) {
-          password = await prompt.password("Password: ");
-          if (!password) {
-            const confirmed = await prompt.password(
-              "This will write your OTP secrets in PLAIN TEXT. Type 'yes' to continue: ",
-            );
-            if (confirmed.trim().toLowerCase() !== "yes") {
-              await usage(1, "Export cancelled");
-              break;
-            }
-          } else {
-            const confirm = await prompt.password("Confirm password: ");
-            if (password !== confirm) {
-              await usage(1, "Passwords didn't match");
-              break;
-            }
-          }
-        } else {
-          password = await prompt.password("");
-        }
-        await store.export(password, name);
-        if (flags.stdio) console.log(`Exported to ${name}`);
-        break;
-      }
-      case "import": {
-        store = new SecretManager("org.fordi.otp", env, flags);
-        const getPassword = () =>
-          prompt.password(process.stdin.isTTY ? "Password: " : "");
-        const { added, updated } = await store.import(getPassword, name);
-        if (flags.stdio) {
-          console.log(`Imported from ${name}`);
-          for (const n of added) console.log(`  added: ${n}`);
-          for (const n of updated) console.log(`  updated: ${n}`);
-        } else if (added.length || updated.length) {
-          console.log(
-            markdownTable([
-              ["Name", "Status"],
-              ...added.map((n) => [n, "added"]),
-              ...updated.map((n) => [n, "updated"]),
-            ]),
-          );
-        }
-        break;
-      }
+  try {
+    for (const { name, args: cmdArgs, flags } of await parseArgs(args)) {
+      const store = new SecretManager("org.fordi.otp", env, flags);
+      await COMMANDS[name].execute({ store, flags, env }, ...cmdArgs);
     }
+  } catch (e) {
+    const ok = e.ok ?? false;
+    if (e.silent) {
+      process.exit(ok ? 0 : 1);
+      return;
+    }
+    await usage(ok ? 0 : 1, e.message || undefined);
   }
 }
 
-if (
-  process.argv[1] &&
-  realpathSync(process.argv[1]) === import.meta.filename
-) {
+if (process.argv[1] && realpathSync(process.argv[1]) === import.meta.filename) {
   main(process.argv.slice(2), process.env).catch((e) => console.error(e));
 }

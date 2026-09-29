@@ -13,6 +13,10 @@ import { EventEmitter } from "node:events";
 import { gzipSync } from "node:zlib";
 import * as otp from "../otp";
 
+process.exit = () => {
+  throw new Error("Process.exit called");
+};
+
 const withPlatform = (platform, fn) => {
   const original = Object.getOwnPropertyDescriptor(process, "platform");
   Object.defineProperty(process, "platform", {
@@ -30,14 +34,14 @@ describe("parseArgs", () => {
   it("parses an argument list and environment", async () => {
     const commands = await otp.parseArgs(["-cs", "code", "npm"], {});
     deepEqual(commands, [
-      ["code", "npm", undefined, { clipboard: true, stdio: false }],
+      { name: "code", args: ["npm"], flags: { clipboard: true, stdout: false } },
     ]);
   });
 
   it("defaults to list with no args", async () => {
     const commands = await otp.parseArgs([]);
     equal(commands.length, 1);
-    equal(commands[0][0], "list");
+    equal(commands[0].name, "list");
   });
 
   it("parses add with name and url, resetting flags after", async () => {
@@ -50,32 +54,56 @@ describe("parseArgs", () => {
       "npm",
     ]);
     equal(commands.length, 2);
-    deepEqual(commands[0].slice(0, 3), [
-      "add",
-      "npm",
-      "otpauth://totp/npm?secret=AAAA",
-    ]);
-    ok(commands[0][3].clipboard);
+    deepEqual(commands[0], {
+      name: "add",
+      args: ["npm", "otpauth://totp/npm?secret=AAAA"],
+      flags: { clipboard: true, stdout: true },
+    });
+    ok(commands[0].flags.clipboard);
   });
 
   it("parses delete with a name", async () => {
     const commands = await otp.parseArgs(["delete", "npm"]);
-    deepEqual(commands[0].slice(0, 3), ["delete", "npm", undefined]);
+    deepEqual(commands[0], {
+      name: "delete",
+      args: ["npm"],
+      flags: { stdout: true },
+    });
   });
 
   it("parses rename with a current and new name", async () => {
     const commands = await otp.parseArgs(["rename", "npm", "npm-work"]);
-    deepEqual(commands[0].slice(0, 3), ["rename", "npm", "npm-work"]);
+    deepEqual(commands[0], {
+      name: "rename",
+      args: ["npm", "npm-work"],
+      flags: { stdout: true },
+    });
   });
 
   it("parses export with just a filename", async () => {
     const commands = await otp.parseArgs(["export", "out.bin"]);
-    deepEqual(commands[0].slice(0, 3), ["export", "out.bin", undefined]);
+    deepEqual(commands[0], {
+      name: "export",
+      args: ["out.bin"],
+      flags: { stdout: true },
+    });
+  });
+
+  it("throws when export has no filename", async () => {
+    await rejects(() => otp.parseArgs(["export"]));
+  });
+
+  it("throws when export has no filename, even with a preceding flag", async () => {
+    await rejects(() => otp.parseArgs(["--unencrypted", "export"]));
   });
 
   it("parses import with just a filename", async () => {
     const commands = await otp.parseArgs(["import", "out.bin"]);
-    deepEqual(commands[0].slice(0, 3), ["import", "out.bin", undefined]);
+    deepEqual(commands[0], {
+      name: "import",
+      args: ["out.bin"],
+      flags: { stdout: true },
+    });
   });
 
   it("parses long flags --clip and --stdout", async () => {
@@ -83,8 +111,8 @@ describe("parseArgs", () => {
     process.stdout.isTTY = false;
     try {
       const commands = await otp.parseArgs(["--clip", "--stdout", "code", "x"]);
-      ok(commands[0][3].clipboard);
-      ok(!commands[0][3].stdout);
+      ok(commands[0].flags.clipboard);
+      ok(!commands[0].flags.stdout);
     } finally {
       process.stdout.isTTY = original;
     }
@@ -92,12 +120,12 @@ describe("parseArgs", () => {
 
   it("parses --verbose and -v as counters", async () => {
     const commands = await otp.parseArgs(["-vv", "code", "x"]);
-    equal(commands[0][3].verbose, 2);
+    equal(commands[0].flags.verbose, 2);
   });
 
   it("parses --home and -H", async () => {
     const commands = await otp.parseArgs(["--home", "/tmp/x", "code", "y"]);
-    equal(commands[0][3].home, "/tmp/x");
+    equal(commands[0].flags.home, "/tmp/x");
   });
 
   it("throws when -H is not the last shorthand flag", async () => {
@@ -106,72 +134,56 @@ describe("parseArgs", () => {
 
   it("parses -H as the last shorthand flag", async () => {
     const commands = await otp.parseArgs(["-cH", "/tmp/x", "code", "y"]);
-    equal(commands[0][3].home, "/tmp/x");
-    ok(commands[0][3].clipboard);
+    equal(commands[0].flags.home, "/tmp/x");
+    ok(commands[0].flags.clipboard);
   });
 
   it("parses --verbose as a long flag counter", async () => {
     const commands = await otp.parseArgs(["--verbose", "code", "x"]);
-    equal(commands[0][3].verbose, 1);
+    equal(commands[0].flags.verbose, 1);
   });
 
   it("calls update() on -u and --update", async (t) => {
-    t.mock.method(process, "exit", () => {
-      throw new Error("exit");
-    });
     t.mock.method(globalThis, "fetch", async () => ({ body: "" }));
     const originalArgv1 = process.argv[1];
     process.argv[1] = "/tmp/otp-update-test";
     try {
-      await rejects(() => otp.parseArgs(["-u"]), /exit/);
-      await rejects(() => otp.parseArgs(["--update"]), /exit/);
+      await rejects(() => otp.parseArgs(["-u"]), otp.UpdateCompleteNonError);
+      await rejects(
+        () => otp.parseArgs(["--update"]),
+        otp.UpdateCompleteNonError,
+      );
     } finally {
       process.argv[1] = originalArgv1;
     }
   });
 
-  it("treats a bare value as an implicit command", async () => {
+  it("treats a bare value as an implicit code command", async () => {
     const commands = await otp.parseArgs(["myservice"]);
-    deepEqual(commands[0].slice(0, 2), ["implicit", "myservice"]);
+    equal(commands[0].name, "code");
+    deepEqual(commands[0].args, ["myservice"]);
   });
 
-  it("calls usage(1) on unknown long flag", async (t) => {
-    t.mock.method(process, "exit", () => {
-      throw new Error("exit");
-    });
-    const write = t.mock.method(process.stderr, "write", () => true);
-    await rejects(() => otp.parseArgs(["--bogus"]), /exit/);
-    ok(write.mock.calls[0].arguments[0].includes("Unknown flag: --bogus"));
-    equal(process.exit.mock.calls[0].arguments[0], 1);
+  it("throws on unknown long flag", async () => {
+    await rejects(() => otp.parseArgs(["--bogus"]), /Unknown flag: --bogus/);
   });
 
-  it("calls usage(1) on unknown short flag", async (t) => {
-    t.mock.method(process, "exit", () => {
-      throw new Error("exit");
-    });
-    t.mock.method(process.stderr, "write", () => true);
-    await rejects(() => otp.parseArgs(["-z", "code", "x"]), /exit/);
-    equal(process.exit.mock.calls[0].arguments[0], 1);
+  it("throws on unknown short flag", async () => {
+    await rejects(() => otp.parseArgs(["-z", "code", "x"]));
   });
 
-  it("calls usage() on -h and --help", async (t) => {
-    t.mock.method(process, "exit", () => {
-      throw new Error("exit");
-    });
-    t.mock.method(process.stderr, "write", () => true);
-    await rejects(() => otp.parseArgs(["-h"]), /exit/);
-    equal(process.exit.mock.calls[0].arguments[0], 0);
-    await rejects(() => otp.parseArgs(["--help"]), /exit/);
-    equal(process.exit.mock.calls[1].arguments[0], 0);
+  it("throws a HelpNonError on -h and --help", async () => {
+    await rejects(() => otp.parseArgs(["-h"]), otp.HelpNonError);
+    await rejects(() => otp.parseArgs(["--help"]), otp.HelpNonError);
   });
 });
 
 describe("flagsDefault", () => {
-  it("defaults to stdio when not a tty", () => {
+  it("defaults to stdout when not a tty", () => {
     const original = process.stdout.isTTY;
     process.stdout.isTTY = false;
     try {
-      deepEqual(otp.flagsDefault(), { stdio: true });
+      deepEqual(otp.flagsDefault(), { stdout: true });
     } finally {
       process.stdout.isTTY = original;
     }
@@ -194,15 +206,11 @@ describe("update", () => {
     const file = join(dir, "otp-copy.js");
     const originalArgv1 = process.argv[1];
     process.argv[1] = file;
-    t.mock.method(process, "exit", () => {
-      throw new Error("exit");
-    });
     t.mock.method(globalThis, "fetch", async () => ({
       body: Buffer.from("#!/usr/bin/env node\n"),
     }));
     try {
-      await rejects(() => otp.update(), /exit/);
-      const { readFileSync } = await import("node:fs");
+      await rejects(() => otp.update(), otp.UpdateCompleteNonError);
       equal(readFileSync(file, "utf8"), "#!/usr/bin/env node\n");
     } finally {
       process.argv[1] = originalArgv1;
@@ -294,8 +302,7 @@ describe("isOtpUrl", () => {
   it("accepts a valid base32 secret whose length isn't a multiple of 8", () => {
     // Real-world secrets (e.g. from services like Postman) are often not
     // padded to a multiple of 8 characters.
-    const secret52 =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRST";
+    const secret52 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRST";
     equal(secret52.length, 52);
     ok(otp.isOtpUrl(`otpauth://totp/test?secret=${secret52}`));
   });
@@ -520,7 +527,10 @@ describe("getUserHash", () => {
 describe("getPasswordHash", () => {
   it("is a SHA-256 digest of the password", async () => {
     const hash = await otp.getPasswordHash("hunter2");
-    const expected = await crypto.subtle.digest("SHA-256", otp.encode("hunter2"));
+    const expected = await crypto.subtle.digest(
+      "SHA-256",
+      otp.encode("hunter2"),
+    );
     deepEqual(new Uint8Array(hash), new Uint8Array(expected));
   });
 
@@ -577,7 +587,9 @@ describe("isGoogleAuthenticatorExport", () => {
   });
 
   it("rejects the plain name->url export format", () => {
-    ok(!otp.isGoogleAuthenticatorExport({ npm: "otpauth://totp/npm?secret=x" }));
+    ok(
+      !otp.isGoogleAuthenticatorExport({ npm: "otpauth://totp/npm?secret=x" }),
+    );
   });
 
   it("rejects an accounts array with a non-string secret", () => {
@@ -783,7 +795,6 @@ describe("prompt.password", () => {
     await result;
     equal(rawMode, false);
   });
-
 });
 
 describe("hasCommand", () => {
@@ -1069,16 +1080,16 @@ describe("logAndClipCode", () => {
   const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
   const url = `otpauth://hotp/test?secret=${secret}&counter=0`;
 
-  it("logs to stdout when flags.stdio is set", async (t) => {
+  it("logs to stdout when flags.stdout is set", async (t) => {
     const log = t.mock.method(console, "log", () => {});
-    await otp.logAndClipCode(url, { stdio: true, clipboard: false });
+    await otp.logAndClipCode(url, { stdout: true, clipboard: false });
     equal(log.mock.calls.length, 1);
     equal(log.mock.calls[0].arguments[0], "755224");
   });
 
   it("copies to clipboard when flags.clipboard is set", async () => {
     const result = await otp.logAndClipCode(url, {
-      stdio: false,
+      stdout: false,
       clipboard: true,
     });
     equal(result, undefined);
@@ -1086,7 +1097,7 @@ describe("logAndClipCode", () => {
 
   it("accepts a URL instance", async (t) => {
     const log = t.mock.method(console, "log", () => {});
-    await otp.logAndClipCode(new URL(url), { stdio: true, clipboard: false });
+    await otp.logAndClipCode(new URL(url), { stdout: true, clipboard: false });
     equal(log.mock.calls[0].arguments[0], "755224");
   });
 });
@@ -1406,7 +1417,9 @@ describe("SecretManager", () => {
       const flags = { home: join(dir, "local") };
       const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
       const file = join(dir, "plain-urllist.json");
-      const urls = [`otpauth://totp/npm:jane@corp.io?secret=${secret}&issuer=npm`];
+      const urls = [
+        `otpauth://totp/npm:jane@corp.io?secret=${secret}&issuer=npm`,
+      ];
       writeFileSync(file, JSON.stringify(urls));
 
       let called = false;
@@ -2071,7 +2084,8 @@ describe("main", () => {
       t.mock.method(process.stderr, "write", () => true);
       const env = makeEnv(dir);
       await rejects(
-        () => otp.main(["--home", dir, "rename", "missing", "also-missing"], env),
+        () =>
+          otp.main(["--home", dir, "rename", "missing", "also-missing"], env),
         /exit/,
       );
       equal(process.exit.mock.calls[0].arguments[0], 1);
@@ -2210,7 +2224,11 @@ describe("main", () => {
     try {
       await withTmpDir(async (dir) => {
         const log = t.mock.method(console, "log", () => {});
-        const password = t.mock.method(otp.prompt, "password", async () => "hunter2");
+        const password = t.mock.method(
+          otp.prompt,
+          "password",
+          async () => "hunter2",
+        );
         const env = makeEnv(dir);
         await otp.main(
           ["--home", dir, "add", "svc", `otpauth://totp/svc?secret=${secret}`],
@@ -2250,7 +2268,11 @@ describe("main", () => {
     try {
       await withTmpDir(async (dir) => {
         const log = t.mock.method(console, "log", () => {});
-        const password = t.mock.method(otp.prompt, "password", async () => "hunter2");
+        const password = t.mock.method(
+          otp.prompt,
+          "password",
+          async () => "hunter2",
+        );
         const env = makeEnv(dir);
         await otp.main(
           ["--home", dir, "add", "svc", `otpauth://totp/svc?secret=${secret}`],
@@ -2368,9 +2390,7 @@ describe("main", () => {
           env,
         );
         equal(password.mock.calls.length, 1);
-        ok(
-          password.mock.calls[0].arguments[0].includes("PLAIN TEXT"),
-        );
+        ok(password.mock.calls[0].arguments[0].includes("PLAIN TEXT"));
         const contents = readFileSync(exportFile, "utf8");
         ok(contents.includes("otpauth://totp/svc"));
       });
@@ -2500,7 +2520,9 @@ describe("main", () => {
         const file = join(dir, "plain.json");
         writeFileSync(
           file,
-          JSON.stringify([`otpauth://totp/npm:jane@corp.io?secret=${secret}&issuer=npm`]),
+          JSON.stringify([
+            `otpauth://totp/npm:jane@corp.io?secret=${secret}&issuer=npm`,
+          ]),
         );
         await otp.main(["--home", dir, "import", file], env);
         equal(password.mock.calls.length, 0);
@@ -2578,5 +2600,51 @@ describe("main", () => {
     } finally {
       process.stdout.isTTY = originalStdoutTTY;
     }
+  });
+
+  it("rejects an export filename that looks like a flag", async (t) => {
+    await withTmpDir(async (dir) => {
+      const write = t.mock.method(process.stderr, "write", () => true);
+      const exit = t.mock.method(process, "exit", () => {});
+      const env = makeEnv(dir);
+      await otp.main(["--home", dir, "export", "-oops"], env);
+      ok(
+        write.mock.calls.some((c) =>
+          c.arguments[0].includes("filename cannot look like a flag"),
+        ),
+      );
+      equal(exit.mock.calls[0].arguments[0], 1);
+    });
+  });
+
+  it("exits silently (no usage text) when update completes", async (t) => {
+    await withTmpDir(async (dir) => {
+      const write = t.mock.method(process.stderr, "write", () => true);
+      const exit = t.mock.method(process, "exit", () => {});
+      t.mock.method(globalThis, "fetch", async () => ({ body: "" }));
+      const originalArgv1 = process.argv[1];
+      process.argv[1] = join(dir, "otp-copy.js");
+      try {
+        const env = makeEnv(dir);
+        await otp.main(["-u"], env);
+      } finally {
+        process.argv[1] = originalArgv1;
+      }
+      equal(write.mock.calls.length, 0);
+      equal(exit.mock.calls[0].arguments[0], 0);
+    });
+  });
+
+  it("prints the full help text and exits 0 for -h via main()", async (t) => {
+    await withTmpDir(async (dir) => {
+      const write = t.mock.method(process.stderr, "write", () => true);
+      const exit = t.mock.method(process, "exit", () => {});
+      const env = makeEnv(dir);
+      await otp.main(["-h"], env);
+      const output = write.mock.calls.map((c) => c.arguments[0]).join("");
+      ok(output.includes("## Storage"));
+      ok(output.includes("## Examples"));
+      equal(exit.mock.calls[0].arguments[0], 0);
+    });
   });
 });

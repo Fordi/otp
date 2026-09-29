@@ -46,32 +46,32 @@ otp [([flags] command|{name|url|secret})]...
 
 ## Flags
 
-| Flag                   | Description                                |
-| ---------------------- | ------------------------------------------ |
-| `--clip` / `-c`        | toggle clipboard                           |
-| `--stdout` / `-s`      | toggle stdout output                       |
-| `--help` / `-h`        | print this and exit                        |
-| `--home` / `-H {home}` | use a home directory other than `~/.local` |
-| `--update` / `-u`      | update from GitHub                         |
-| `--verbose` / `-v`     | say more                                   |
-| `--unencrypted`        | export in plain text †                     |
+| Flag                | Description                                |
+| ------------------- | ------------------------------------------ |
+| `--clip`/`-c`       | toggle clipboard                           |
+| `--help`/`-h`/`-?`  | print this and exit                        |
+| `--home`/`-H` {arg} | use a home directory other than `~/.local` |
+| `--stdout`/`-s`     | toggle stdout output                       |
+| `--unencrypted`     | export in plain text[^1]                   |
+| `--update`/`-u`     | update from GitHub                         |
+| `--verbose`/`-v`    | say more                                   |
 
 - the default for a tty is clipboard, no stdout
 - the default for a pipe is stdout, no clipboard
 - to flip both at once, use `-cs`
-- † `export` only; requires a tty, prompts to confirm
+- [^1]: `export` only; requires a tty, prompts to confirm
 
 ## Commands
 
-| Command                          | Description                                    |
-| -------------------------------- | ---------------------------------------------- |
-| `list`                           | List the OTPs in your store (the default)      |
-| `add {name} {url\|secret}`       | Add a named OTP                                |
-| `code {name\|url\|secret}`       | Generate a code                                |
-| `delete {name}`                  | Delete a named OTP                             |
-| `rename {currentName} {newName}` | Rename a stored OTP                            |
-| `export {filename}`              | Export the store to an encrypted, gzipped file |
-| `import {filename}`              | Import OTPs from a file made with `export`     |
+| Command                            | Description                                    |
+| ---------------------------------- | ---------------------------------------------- |
+| `add`/`+` {name} {url}             | Add a named OTP                                |
+| `code`/`` {name}                   | Generate a code                                |
+| `delete`/`-`/`rm` {name}           | Delete a named OTP                             |
+| `export`/`x` {filename}            | Export the store to an encrypted, gzipped file |
+| `import`/`i` {filename}            | Import OTPs from a file made with `export`     |
+| `list`/`default`/`ls`              | List the OTPs in your store (the default)      |
+| `rename`/`mv`/`r` {name} {newName} | Rename a stored OTP                            |
 
 - `import` and `export` prompt for a password unless one is piped in.
 
@@ -92,13 +92,13 @@ $ # None of these are real secrets
 $ otp add npm otpauth://totp/npm:coolfellow?secret=ABCDEFGHIJKLMNOPQRSTUVWXYZ234567&issuer=npm
 $ otp code npm # code for npm is now on your clipboard
 $ otp code -cs npm # or just `otp -cs npm`
-337142
+031661
 $ otp list # or just `otp`
 | Name   | Type | Issuer | Account    |
 | ------ | ---- | ------ | ---------- |
 | npm    | totp | npm    | coolfellow |
 | github | totp | GitHub | jiveguy    |
 $ otp -cs code 234567ABCDEFGHIJ # or otp -cs 234567ABCDEFGHIJ
-510190
+585473
 $ npm publish --access=public --otp=$(otp npm) # command-line publish without the fuss
 ```
