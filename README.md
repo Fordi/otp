@@ -79,10 +79,12 @@ otp [([flags] command|{name|url|secret})]...
 ## Storage
 
 OTP URLs are stored in `${HOME}/.local/org.fordi.otp.store`, as an SQLite3 database,
-and are encrypted with a secret key; the key is in your Gnome secret service, or
-Windows credentials manager or, failing those, the file `${HOME}/.local/org.fordi.otp`,
-itself encrypted with a hash of `$USER:$UID:{APP_SECRET}`.
-It ain't much, really - someone with local root could probably figure it out,
+and are encrypted with a secret key; the key is in your DBUS secret service,
+Windows credentials manager, OS-X Keyring or, failing all of those, the
+file `${HOME}/.local/org.fordi.otp`, itself encrypted with a hash of
+`$USER:$UID:{APP_SECRET}`.
+
+That last one ain't much, really - someone with local root could probably figure it out,
 but makes damn certain it's not in cleartext.
 
 ## Examples
