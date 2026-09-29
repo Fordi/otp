@@ -1060,7 +1060,7 @@ export const usage = async (level = 0, msg) => {
     ]),
   ];
   const extraInfo = flagData
-    .map(({ extra }) => (extra ? `- ${extra}` : false))
+    .map(({ extra }) => (extra ? `${extra}` : false))
     .filter(Boolean);
   stream.write(
     [

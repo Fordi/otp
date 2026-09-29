@@ -59,7 +59,7 @@ otp [([flags] command|{name|url|secret})]...
 - the default for a tty is clipboard, no stdout
 - the default for a pipe is stdout, no clipboard
 - to flip both at once, use `-cs`
-- [^1]: `export` only; requires a tty, prompts to confirm
+[^1]: `export` only; requires a tty, prompts to confirm
 
 ## Commands
 
@@ -92,13 +92,13 @@ $ # None of these are real secrets
 $ otp add npm otpauth://totp/npm:coolfellow?secret=ABCDEFGHIJKLMNOPQRSTUVWXYZ234567&issuer=npm
 $ otp code npm # code for npm is now on your clipboard
 $ otp code -cs npm # or just `otp -cs npm`
-031661
+623009
 $ otp list # or just `otp`
 | Name   | Type | Issuer | Account    |
 | ------ | ---- | ------ | ---------- |
 | npm    | totp | npm    | coolfellow |
 | github | totp | GitHub | jiveguy    |
 $ otp -cs code 234567ABCDEFGHIJ # or otp -cs 234567ABCDEFGHIJ
-585473
+331308
 $ npm publish --access=public --otp=$(otp npm) # command-line publish without the fuss
 ```
