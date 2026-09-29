@@ -1,9 +1,16 @@
 import { deepEqual, equal, ok, rejects, throws } from "node:assert";
 import { describe, it } from "node:test";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  existsSync,
+  writeFileSync,
+  readFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
+import { gzipSync } from "node:zlib";
 import * as otp from "../otp";
 
 const withPlatform = (platform, fn) => {
@@ -54,6 +61,11 @@ describe("parseArgs", () => {
   it("parses delete with a name", async () => {
     const commands = await otp.parseArgs(["delete", "npm"]);
     deepEqual(commands[0].slice(0, 3), ["delete", "npm", undefined]);
+  });
+
+  it("parses rename with a current and new name", async () => {
+    const commands = await otp.parseArgs(["rename", "npm", "npm-work"]);
+    deepEqual(commands[0].slice(0, 3), ["rename", "npm", "npm-work"]);
   });
 
   it("parses export with just a filename", async () => {
@@ -277,6 +289,15 @@ describe("isOtpUrl", () => {
 
   it("rejects a secret that isn't valid base32", () => {
     ok(!otp.isOtpUrl("otpauth://totp/test?secret=not-valid!!"));
+  });
+
+  it("accepts a valid base32 secret whose length isn't a multiple of 8", () => {
+    // Real-world secrets (e.g. from services like Postman) are often not
+    // padded to a multiple of 8 characters.
+    const secret52 =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRST";
+    equal(secret52.length, 52);
+    ok(otp.isOtpUrl(`otpauth://totp/test?secret=${secret52}`));
   });
 
   it("rejects a non-numeric or zero digits", () => {
@@ -529,6 +550,166 @@ describe("urlFromSecret", () => {
     const url = otp.urlFromSecret("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
     equal(url.pathname, `/${otp.ANONYMOUS_NO_ACCOUNT}`);
     equal(otp.parseOtpUrl(url).account, otp.ANONYMOUS_NO_ACCOUNT);
+  });
+});
+
+describe("slugify", () => {
+  it("lowercases and replaces non-alphanumerics with underscores", () => {
+    equal(otp.slugify("Cesium Ion"), "cesium_ion");
+  });
+
+  it("collapses runs of separators and trims leading/trailing ones", () => {
+    equal(otp.slugify("  Weird!!  Name__ "), "weird_name");
+  });
+
+  it("leaves an already-clean lowercase name alone", () => {
+    equal(otp.slugify("github"), "github");
+  });
+});
+
+describe("isGoogleAuthenticatorExport", () => {
+  it("accepts a valid accounts array", () => {
+    ok(otp.isGoogleAuthenticatorExport({ accounts: [{ secret: "x" }] }));
+  });
+
+  it("accepts an empty accounts array", () => {
+    ok(otp.isGoogleAuthenticatorExport({ accounts: [] }));
+  });
+
+  it("rejects the plain name->url export format", () => {
+    ok(!otp.isGoogleAuthenticatorExport({ npm: "otpauth://totp/npm?secret=x" }));
+  });
+
+  it("rejects an accounts array with a non-string secret", () => {
+    ok(!otp.isGoogleAuthenticatorExport({ accounts: [{ secret: 5 }] }));
+  });
+
+  it("rejects null and non-objects", () => {
+    ok(!otp.isGoogleAuthenticatorExport(null));
+    ok(!otp.isGoogleAuthenticatorExport("accounts"));
+  });
+});
+
+describe("isOtpUrlListExport", () => {
+  const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+  it("accepts an array of valid OTP URLs", () => {
+    ok(
+      otp.isOtpUrlListExport([
+        `otpauth://totp/npm?secret=${secret}`,
+        `otpauth://hotp/svc?secret=${secret}&counter=0`,
+      ]),
+    );
+  });
+
+  it("rejects an array containing an invalid entry", () => {
+    ok(
+      !otp.isOtpUrlListExport([`otpauth://totp/npm?secret=${secret}`, "nope"]),
+    );
+  });
+
+  it("rejects the Google Authenticator export shape", () => {
+    ok(!otp.isOtpUrlListExport({ accounts: [{ secret: "x" }] }));
+  });
+
+  it("rejects the plain name->url export format", () => {
+    ok(!otp.isOtpUrlListExport({ npm: `otpauth://totp/npm?secret=${secret}` }));
+  });
+});
+
+describe("nameForImportedUrl", () => {
+  const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+  it("names by slugged issuer", () => {
+    const used = new Set();
+    const name = otp.nameForImportedUrl(
+      used,
+      `otpauth://totp/Cesium%20Ion:jane@cesium.io?secret=${secret}&issuer=Cesium+Ion`,
+    );
+    equal(name, "cesium_ion");
+    ok(used.has("cesium_ion"));
+  });
+
+  it("appends slugged account on collision", () => {
+    const used = new Set(["cesium_ion"]);
+    const name = otp.nameForImportedUrl(
+      used,
+      `otpauth://totp/Cesium%20Ion:john@cesium.io?secret=${secret}&issuer=Cesium+Ion`,
+    );
+    equal(name, "cesium_ion_john_cesium_io");
+  });
+
+  it("falls back to the account when there's no issuer", () => {
+    const used = new Set();
+    const name = otp.nameForImportedUrl(
+      used,
+      `otpauth://totp/justaname?secret=${secret}`,
+    );
+    equal(name, "justaname");
+  });
+});
+
+describe("urlFromGoogleAuthenticatorAccount", () => {
+  const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+  it("omits algorithm, digits, and period when they match the defaults", () => {
+    const url = otp.urlFromGoogleAuthenticatorAccount({
+      secret,
+      name: "jane@cesium.io",
+      issuer: "Cesium Ion",
+      algorithm: "SHA1",
+      digits: 6,
+      period: 30,
+    });
+    ok(!url.searchParams.has("algorithm"));
+    ok(!url.searchParams.has("digits"));
+    ok(!url.searchParams.has("period"));
+    equal(url.searchParams.get("secret"), secret);
+    equal(url.searchParams.get("issuer"), "Cesium Ion");
+  });
+
+  it("includes algorithm, digits, and period when they differ from the defaults", () => {
+    const url = otp.urlFromGoogleAuthenticatorAccount({
+      secret,
+      name: "jane@cesium.io",
+      issuer: "Cesium Ion",
+      algorithm: "SHA256",
+      digits: 8,
+      period: 60,
+    });
+    equal(url.searchParams.get("algorithm"), "SHA256");
+    equal(url.searchParams.get("digits"), "8");
+    equal(url.searchParams.get("period"), "60");
+  });
+
+  it("builds a label from issuer:name", () => {
+    const url = otp.urlFromGoogleAuthenticatorAccount({
+      secret,
+      name: "jane@cesium.io",
+      issuer: "Cesium Ion",
+    });
+    equal(otp.parseOtpUrl(url).issuer, "Cesium Ion");
+    equal(otp.parseOtpUrl(url).account, "jane@cesium.io");
+  });
+
+  it("falls back to just the name when there's no issuer", () => {
+    const url = otp.urlFromGoogleAuthenticatorAccount({
+      secret,
+      name: "jane@cesium.io",
+    });
+    equal(otp.parseOtpUrl(url).account, "jane@cesium.io");
+    ok(!url.searchParams.has("issuer"));
+  });
+
+  it("produces a valid, working OTP URL", async () => {
+    const url = otp.urlFromGoogleAuthenticatorAccount({
+      secret,
+      name: "jane@cesium.io",
+      issuer: "Cesium Ion",
+    });
+    ok(otp.isOtpUrl(url));
+    const code = await otp.otp(url);
+    equal(code.length, 6);
   });
 });
 
@@ -998,6 +1179,67 @@ describe("SecretManager", () => {
     }
   });
 
+  it("renames a stored entry, preserving its value", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      const url = `otpauth://totp/svc?secret=${secret}`;
+      await store.set("svc", url);
+      equal(await store.rename("svc", "svc2"), true);
+      deepEqual(await store.list(), ["svc2"]);
+      equal(await store.get("svc2"), url);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns false when renaming a name that doesn't exist", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      equal(await store.rename("nope", "also-nope"), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("throws when renaming to a name that already exists", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      await store.set("svc1", `otpauth://totp/svc1?secret=${secret}`);
+      await store.set("svc2", `otpauth://totp/svc2?secret=${secret}`);
+      await rejects(() => store.rename("svc1", "svc2"), /already exists/);
+      deepEqual((await store.list()).sort(), ["svc1", "svc2"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("exports as a plain URL list when password is falsy", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      const url1 = `otpauth://totp/svc1?secret=${secret}`;
+      const url2 = `otpauth://hotp/svc2?secret=${secret}&counter=5`;
+      await store.set("svc1", url1);
+      await store.set("svc2", url2);
+
+      const file = join(dir, "plain.txt");
+      await store.export(undefined, file);
+      const contents = readFileSync(file, "utf8");
+      const lines = contents.trim().split("\n");
+      ok(otp.isOtpUrlListExport(lines));
+      deepEqual(lines.sort(), [url1, url2].sort());
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("exports and imports a store, round-tripping every entry", async () => {
     const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
     try {
@@ -1020,6 +1262,288 @@ describe("SecretManager", () => {
       deepEqual((await store2.list()).sort(), ["svc1", "svc2"]);
       equal(await store2.get("svc1"), url1);
       equal(await store2.get("svc2"), url2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports every entry as added into an empty store", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const env = makeEnv(dir);
+      const flags1 = { home: join(dir, "local1") };
+      const store1 = new otp.SecretManager("org.fordi.otp", env, flags1);
+      await store1.set("svc1", `otpauth://totp/svc1?secret=${secret}`);
+      await store1.set("svc2", `otpauth://totp/svc2?secret=${secret}`);
+      const exportFile = join(dir, "export.bin");
+      await store1.export("hunter2", exportFile);
+
+      const flags2 = { home: join(dir, "local2") };
+      const store2 = new otp.SecretManager("org.fordi.otp", env, flags2);
+      const report = await store2.import("hunter2", exportFile);
+      deepEqual(report.added.sort(), ["svc1", "svc2"]);
+      deepEqual(report.updated, []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports pre-existing entries as updated", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      await store.set("svc", `otpauth://totp/svc?secret=${secret}`);
+      const file = join(dir, "map.json");
+      writeFileSync(
+        file,
+        JSON.stringify({
+          svc: `otpauth://totp/svc?secret=${secret}&digits=8`,
+          other: `otpauth://totp/other?secret=${secret}`,
+        }),
+      );
+      const report = await store.import("unused", file);
+      deepEqual(report.added, ["other"]);
+      deepEqual(report.updated, ["svc"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  const writeEncryptedExport = async (file, password, data) => {
+    const json = gzipSync(otp.encode(JSON.stringify(data)));
+    const [iv, encrypted] = await otp.encrypt(
+      await otp.getPasswordHash(password),
+      json,
+    );
+    writeFileSync(
+      file,
+      Buffer.concat([Buffer.from(iv), Buffer.from(encrypted)]),
+    );
+  };
+
+  it("imports a Google Authenticator export, naming by slugged issuer", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      const file = join(dir, "ga-export.bin");
+      await writeEncryptedExport(file, "hunter2", {
+        accounts: [
+          {
+            secret,
+            name: "jane@cesium.io",
+            issuer: "Cesium Ion",
+            algorithm: "SHA1",
+            digits: 6,
+            period: 30,
+          },
+          {
+            secret,
+            name: "john@cesium.io",
+            issuer: "Cesium Ion",
+            algorithm: "SHA1",
+            digits: 6,
+            period: 30,
+          },
+        ],
+      });
+      await store.import("hunter2", file);
+      deepEqual((await store.list()).sort(), [
+        "cesium_ion",
+        "cesium_ion_john_cesium_io",
+      ]);
+      ok((await store.get("cesium_ion")).includes("jane%40cesium.io"));
+      ok(
+        (await store.get("cesium_ion_john_cesium_io")).includes(
+          "john%40cesium.io",
+        ),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("imports a plain list of OTP URLs, naming with the same rules", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      const file = join(dir, "urllist-export.bin");
+      const urls = [
+        `otpauth://totp/npm:jane@corp.io?secret=${secret}&issuer=npm`,
+        `otpauth://totp/npm:john@corp.io?secret=${secret}&issuer=npm`,
+        `otpauth://totp/justaname?secret=${secret}`,
+      ];
+      await writeEncryptedExport(file, "hunter2", urls);
+      await store.import("hunter2", file);
+      deepEqual((await store.list()).sort(), [
+        "justaname",
+        "npm",
+        "npm_john_corp_io",
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a UTF-8 text file that is neither JSON nor a URL list", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      const file = join(dir, "garbage.txt");
+      writeFileSync(file, "this is just some plain text, not otp urls");
+      await rejects(() => store.import("unused", file), /not a recognized/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("imports a plaintext (unencrypted) URL list without requesting a password", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      const file = join(dir, "plain-urllist.json");
+      const urls = [`otpauth://totp/npm:jane@corp.io?secret=${secret}&issuer=npm`];
+      writeFileSync(file, JSON.stringify(urls));
+
+      let called = false;
+      await store.import(() => {
+        called = true;
+        return "unused";
+      }, file);
+      equal(called, false);
+      deepEqual(await store.list(), ["npm"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("imports a newline-separated (non-JSON) URL list without requesting a password", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      const file = join(dir, "urls.txt");
+      writeFileSync(
+        file,
+        [
+          `otpauth://totp/npm:jane@corp.io?secret=${secret}&issuer=npm`,
+          `otpauth://totp/GitHub:jane?secret=${secret}`,
+        ].join("\n"),
+      );
+
+      let called = false;
+      await store.import(() => {
+        called = true;
+        return "unused";
+      }, file);
+      equal(called, false);
+      deepEqual((await store.list()).sort(), ["github", "npm"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips blank lines and # comments in a newline-separated URL list", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      const file = join(dir, "urls.txt");
+      writeFileSync(
+        file,
+        [
+          "# My OTP backup",
+          "",
+          `otpauth://totp/npm:jane@corp.io?secret=${secret}&issuer=npm`,
+          "  # indented comment",
+          "",
+          `otpauth://totp/GitHub:jane?secret=${secret}`,
+          "",
+        ].join("\n"),
+      );
+
+      let called = false;
+      await store.import(() => {
+        called = true;
+        return "unused";
+      }, file);
+      equal(called, false);
+      deepEqual((await store.list()).sort(), ["github", "npm"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("imports a plaintext (unencrypted) Google Authenticator export without requesting a password", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      const file = join(dir, "plain-ga.json");
+      writeFileSync(
+        file,
+        JSON.stringify({
+          accounts: [{ secret, name: "jane@cesium.io", issuer: "Cesium Ion" }],
+        }),
+      );
+
+      let called = false;
+      await store.import(() => {
+        called = true;
+        return "unused";
+      }, file);
+      equal(called, false);
+      deepEqual(await store.list(), ["cesium_ion"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("imports a plaintext (unencrypted) name->url map without requesting a password", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const flags = { home: join(dir, "local") };
+      const store = new otp.SecretManager("org.fordi.otp", makeEnv(dir), flags);
+      const file = join(dir, "plain-map.json");
+      const url = `otpauth://totp/svc?secret=${secret}`;
+      writeFileSync(file, JSON.stringify({ svc: url }));
+
+      let called = false;
+      await store.import(() => {
+        called = true;
+        return "unused";
+      }, file);
+      equal(called, false);
+      equal(await store.get("svc"), url);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still prompts for and decrypts an encrypted export", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otp-test-"));
+    try {
+      const env = makeEnv(dir);
+      const flags1 = { home: join(dir, "local1") };
+      const store1 = new otp.SecretManager("org.fordi.otp", env, flags1);
+      const url = `otpauth://totp/svc?secret=${secret}`;
+      await store1.set("svc", url);
+      const file = join(dir, "encrypted.bin");
+      await store1.export("hunter2", file);
+
+      const flags2 = { home: join(dir, "local2") };
+      const store2 = new otp.SecretManager("org.fordi.otp", env, flags2);
+      let called = 0;
+      await store2.import(() => {
+        called++;
+        return "hunter2";
+      }, file);
+      equal(called, 1);
+      equal(await store2.get("svc"), url);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1520,6 +2044,63 @@ describe("main", () => {
     });
   });
 
+  it("renames a named OTP", async (t) => {
+    await withTmpDir(async (dir) => {
+      const log = t.mock.method(console, "log", () => {});
+      const env = makeEnv(dir);
+      await otp.main(
+        ["--home", dir, "add", "svc", `otpauth://totp/svc?secret=${secret}`],
+        env,
+      );
+      log.mock.resetCalls();
+      await otp.main(["--home", dir, "rename", "svc", "svc2"], env);
+      ok(log.mock.calls[0].arguments[0].includes("Renamed svc to svc2"));
+
+      const store = new otp.SecretManager("org.fordi.otp", env, {
+        home: dir,
+      });
+      deepEqual(await store.list(), ["svc2"]);
+    });
+  });
+
+  it("calls usage(1) when renaming a name that doesn't exist", async (t) => {
+    await withTmpDir(async (dir) => {
+      t.mock.method(process, "exit", () => {
+        throw new Error("exit");
+      });
+      t.mock.method(process.stderr, "write", () => true);
+      const env = makeEnv(dir);
+      await rejects(
+        () => otp.main(["--home", dir, "rename", "missing", "also-missing"], env),
+        /exit/,
+      );
+      equal(process.exit.mock.calls[0].arguments[0], 1);
+    });
+  });
+
+  it("calls usage(1) when renaming to a name that already exists", async (t) => {
+    await withTmpDir(async (dir) => {
+      t.mock.method(process, "exit", () => {
+        throw new Error("exit");
+      });
+      t.mock.method(process.stderr, "write", () => true);
+      const env = makeEnv(dir);
+      await otp.main(
+        ["--home", dir, "add", "svc1", `otpauth://totp/svc1?secret=${secret}`],
+        env,
+      );
+      await otp.main(
+        ["--home", dir, "add", "svc2", `otpauth://totp/svc2?secret=${secret}`],
+        env,
+      );
+      await rejects(
+        () => otp.main(["--home", dir, "rename", "svc1", "svc2"], env),
+        /exit/,
+      );
+      equal(process.exit.mock.calls[0].arguments[0], 1);
+    });
+  });
+
   it("lists stored OTPs as a table when interactive, or a message when empty", async (t) => {
     const originalIsTTY = process.stdout.isTTY;
     process.stdout.isTTY = true;
@@ -1735,6 +2316,153 @@ describe("main", () => {
     }
   });
 
+  it("rejects --unencrypted export when stdin is not a tty", async (t) => {
+    const originalStdinTTY = process.stdin.isTTY;
+    process.stdin.isTTY = false;
+    try {
+      await withTmpDir(async (dir) => {
+        t.mock.method(process, "exit", () => {
+          throw new Error("exit");
+        });
+        t.mock.method(process.stderr, "write", () => true);
+        const password = t.mock.method(otp.prompt, "password", async () => {
+          throw new Error("should not prompt");
+        });
+        const env = makeEnv(dir);
+        const exportFile = join(dir, "export.txt");
+        await rejects(
+          () =>
+            otp.main(
+              ["--home", dir, "--unencrypted", "export", exportFile],
+              env,
+            ),
+          /exit/,
+        );
+        equal(process.exit.mock.calls[0].arguments[0], 1);
+        equal(password.mock.calls.length, 0);
+        ok(!existsSync(exportFile));
+      });
+    } finally {
+      process.stdin.isTTY = originalStdinTTY;
+    }
+  });
+
+  it("writes a plain export with --unencrypted after confirming interactively", async (t) => {
+    const originalStdinTTY = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    try {
+      await withTmpDir(async (dir) => {
+        const password = t.mock.method(
+          otp.prompt,
+          "password",
+          async () => "yes",
+        );
+        const env = makeEnv(dir);
+        await otp.main(
+          ["--home", dir, "add", "svc", `otpauth://totp/svc?secret=${secret}`],
+          env,
+        );
+        const exportFile = join(dir, "export.txt");
+        await otp.main(
+          ["--home", dir, "--unencrypted", "export", exportFile],
+          env,
+        );
+        equal(password.mock.calls.length, 1);
+        ok(
+          password.mock.calls[0].arguments[0].includes("PLAIN TEXT"),
+        );
+        const contents = readFileSync(exportFile, "utf8");
+        ok(contents.includes("otpauth://totp/svc"));
+      });
+    } finally {
+      process.stdin.isTTY = originalStdinTTY;
+    }
+  });
+
+  it("cancels --unencrypted export when not confirmed", async (t) => {
+    const originalStdinTTY = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    try {
+      await withTmpDir(async (dir) => {
+        t.mock.method(process, "exit", () => {
+          throw new Error("exit");
+        });
+        t.mock.method(process.stderr, "write", () => true);
+        t.mock.method(otp.prompt, "password", async () => "no");
+        const env = makeEnv(dir);
+        const exportFile = join(dir, "export.txt");
+        await rejects(
+          () =>
+            otp.main(
+              ["--home", dir, "--unencrypted", "export", exportFile],
+              env,
+            ),
+          /exit/,
+        );
+        equal(process.exit.mock.calls[0].arguments[0], 1);
+        ok(!existsSync(exportFile));
+      });
+    } finally {
+      process.stdin.isTTY = originalStdinTTY;
+    }
+  });
+
+  it("writes a plain export when the password prompt is left empty, after confirming", async (t) => {
+    const originalStdinTTY = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    try {
+      await withTmpDir(async (dir) => {
+        let call = 0;
+        const password = t.mock.method(otp.prompt, "password", async () => {
+          call++;
+          return call === 1 ? "" : "yes";
+        });
+        const env = makeEnv(dir);
+        await otp.main(
+          ["--home", dir, "add", "svc", `otpauth://totp/svc?secret=${secret}`],
+          env,
+        );
+        const exportFile = join(dir, "export.txt");
+        await otp.main(["--home", dir, "export", exportFile], env);
+        equal(password.mock.calls.length, 2);
+        equal(password.mock.calls[0].arguments[0], "Password: ");
+        ok(password.mock.calls[1].arguments[0].includes("PLAIN TEXT"));
+        const contents = readFileSync(exportFile, "utf8");
+        ok(contents.includes("otpauth://totp/svc"));
+      });
+    } finally {
+      process.stdin.isTTY = originalStdinTTY;
+    }
+  });
+
+  it("cancels export when the password prompt is left empty and not confirmed", async (t) => {
+    const originalStdinTTY = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    try {
+      await withTmpDir(async (dir) => {
+        t.mock.method(process, "exit", () => {
+          throw new Error("exit");
+        });
+        t.mock.method(process.stderr, "write", () => true);
+        let call = 0;
+        t.mock.method(otp.prompt, "password", async () => {
+          call++;
+          return call === 1 ? "" : "no";
+        });
+        const env = makeEnv(dir);
+        const exportFile = join(dir, "export.txt");
+        await rejects(
+          () => otp.main(["--home", dir, "export", exportFile], env),
+          /exit/,
+        );
+        equal(process.exit.mock.calls[0].arguments[0], 1);
+        ok(!existsSync(exportFile));
+      });
+    } finally {
+      process.stdin.isTTY = originalStdinTTY;
+    }
+  });
+
   it("prompts interactively even when only stdout is piped", async (t) => {
     const originalStdoutTTY = process.stdout.isTTY;
     const originalStdinTTY = process.stdin.isTTY;
@@ -1757,6 +2485,98 @@ describe("main", () => {
     } finally {
       process.stdout.isTTY = originalStdoutTTY;
       process.stdin.isTTY = originalStdinTTY;
+    }
+  });
+
+  it("imports a plaintext file via main() without prompting", async (t) => {
+    const originalStdinTTY = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    try {
+      await withTmpDir(async (dir) => {
+        const password = t.mock.method(otp.prompt, "password", async () => {
+          throw new Error("should not be called");
+        });
+        const env = makeEnv(dir);
+        const file = join(dir, "plain.json");
+        writeFileSync(
+          file,
+          JSON.stringify([`otpauth://totp/npm:jane@corp.io?secret=${secret}&issuer=npm`]),
+        );
+        await otp.main(["--home", dir, "import", file], env);
+        equal(password.mock.calls.length, 0);
+
+        const store = new otp.SecretManager("org.fordi.otp", env, {
+          home: dir,
+        });
+        deepEqual(await store.list(), ["npm"]);
+      });
+    } finally {
+      process.stdin.isTTY = originalStdinTTY;
+    }
+  });
+
+  it("reports added/updated rows when piped, as plain lines", async (t) => {
+    const originalStdoutTTY = process.stdout.isTTY;
+    process.stdout.isTTY = false;
+    try {
+      await withTmpDir(async (dir) => {
+        const log = t.mock.method(console, "log", () => {});
+        const env = makeEnv(dir);
+        await otp.main(
+          ["--home", dir, "add", "svc", `otpauth://totp/svc?secret=${secret}`],
+          env,
+        );
+        const file = join(dir, "map.json");
+        writeFileSync(
+          file,
+          JSON.stringify({
+            svc: `otpauth://totp/svc?secret=${secret}&digits=8`,
+            other: `otpauth://totp/other?secret=${secret}`,
+          }),
+        );
+        log.mock.resetCalls();
+        await otp.main(["--home", dir, "import", file], env);
+        const output = log.mock.calls.map((c) => c.arguments[0]).join("\n");
+        ok(output.includes(`Imported from ${file}`));
+        ok(output.includes("added: other"));
+        ok(output.includes("updated: svc"));
+      });
+    } finally {
+      process.stdout.isTTY = originalStdoutTTY;
+    }
+  });
+
+  it("reports added/updated rows when interactive, as a table", async (t) => {
+    const originalStdoutTTY = process.stdout.isTTY;
+    process.stdout.isTTY = true;
+    try {
+      await withTmpDir(async (dir) => {
+        const log = t.mock.method(console, "log", () => {});
+        const env = makeEnv(dir);
+        await otp.main(
+          ["--home", dir, "add", "svc", `otpauth://totp/svc?secret=${secret}`],
+          env,
+        );
+        const file = join(dir, "map.json");
+        writeFileSync(
+          file,
+          JSON.stringify({
+            svc: `otpauth://totp/svc?secret=${secret}&digits=8`,
+            other: `otpauth://totp/other?secret=${secret}`,
+          }),
+        );
+        log.mock.resetCalls();
+        await otp.main(["--home", dir, "import", file], env);
+        const output = log.mock.calls[0].arguments[0];
+        ok(output.includes("Name"));
+        ok(output.includes("Status"));
+        ok(output.includes("other"));
+        ok(output.includes("added"));
+        ok(output.includes("svc"));
+        ok(output.includes("updated"));
+      });
+    } finally {
+      process.stdout.isTTY = originalStdoutTTY;
     }
   });
 });

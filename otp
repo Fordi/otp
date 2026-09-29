@@ -275,6 +275,57 @@ export class BinarySecret {
   }
 }
 
+export const slugify = (str) =>
+  str
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+export const urlFromGoogleAuthenticatorAccount = ({
+  secret,
+  name,
+  issuer,
+  algorithm,
+  digits,
+  period,
+}) => {
+  const label = issuer ? `${issuer}:${name}` : name;
+  const url = new URL(`otpauth://totp/${encodeURIComponent(label)}`);
+  url.searchParams.set("secret", secret);
+  if (issuer) url.searchParams.set("issuer", issuer);
+  if (algorithm && algorithm.toUpperCase() !== "SHA1") {
+    url.searchParams.set("algorithm", algorithm);
+  }
+  if (digits && Number(digits) !== 6) {
+    url.searchParams.set("digits", String(digits));
+  }
+  if (period && Number(period) !== 30) {
+    url.searchParams.set("period", String(period));
+  }
+  return url;
+};
+
+export const isGoogleAuthenticatorExport = (data) =>
+  !!data &&
+  typeof data === "object" &&
+  Array.isArray(data.accounts) &&
+  data.accounts.every((a) => a && typeof a.secret === "string");
+
+export const isOtpUrlListExport = (data) =>
+  Array.isArray(data) && data.every((entry) => isOtpUrl(entry));
+
+export const nameForImportedUrl = (usedNames, url) => {
+  const { issuer, account } = parseOtpUrl(url);
+  const issuerSlug = slugify(issuer ?? account);
+  let name = issuerSlug;
+  if (usedNames.has(name)) {
+    name = `${issuerSlug}_${slugify(account)}`;
+  }
+  usedNames.add(name);
+  return name;
+};
+
 export class SecretManager {
   #secretService;
   #file;
@@ -292,6 +343,9 @@ export class SecretManager {
     );
     const listKeys = store.prepare("SELECT key FROM store ORDER BY key ASC");
     const deleteByKey = store.prepare("DELETE FROM store WHERE key = ?");
+    const renameKey = store.prepare(
+      "UPDATE store SET key = ? WHERE key = ?",
+    );
     return {
       get: (key) => {
         const { iv, encrypted } = getValueByKey.get(key) ?? {};
@@ -302,6 +356,7 @@ export class SecretManager {
       },
       list: () => listKeys.all(),
       delete: (key) => deleteByKey.run(key).changes > 0,
+      rename: (from, to) => renameKey.run(to, from).changes > 0,
       close: () => store.close(),
     };
   }
@@ -427,25 +482,100 @@ export class SecretManager {
     }
   }
 
+  async rename(from, to) {
+    const db = this.#open();
+    try {
+      if (db.get(to)) {
+        throw new Error(`"${to}" already exists`);
+      }
+      return db.rename(from, to);
+    } finally {
+      db.close();
+    }
+  }
+
   async export(password, file) {
+    const names = await this.list();
+    if (!password) {
+      const urls = [];
+      for (const name of names) {
+        urls.push(await this.get(name));
+      }
+      await writeFile(file, urls.join("\n") + "\n", "utf8");
+      return;
+    }
     const entries = {};
-    for (const name of await this.list()) {
+    for (const name of names) {
       entries[name] = await this.get(name);
     }
-    const json = gzipSync(encode(JSON.stringify(entries)),  { level: 9 });
+    const json = gzipSync(encode(JSON.stringify(entries)), { level: 9 });
     const [iv, encrypted] = await encrypt(await getPasswordHash(password), json);
     await writeFile(file, Buffer.concat([Buffer.from(iv), Buffer.from(encrypted)]));
   }
 
-  async import(password, file) {
+  async import(getPassword, file) {
     const bytes = await readFile(file);
-    const iv = bytes.subarray(0, 12);
-    const encrypted = bytes.subarray(12);
-    const json = await decrypt(await getPasswordHash(password), [iv, encrypted]);
-    const entries = JSON.parse(decode(gunzipSync(json)));
-    for (const [name, value] of Object.entries(entries)) {
-      await this.set(name, value);
+    let text;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      text = undefined;
     }
+    let data;
+    if (text !== undefined) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        const lines = text
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0 && !line.startsWith("#"));
+        if (lines.length === 0 || !lines.every((line) => isOtpUrl(line))) {
+          throw new Error(`"${file}" is not a recognized OTP export format`);
+        }
+        data = lines;
+      }
+    } else {
+      const password =
+        typeof getPassword === "function" ? await getPassword() : getPassword;
+      const iv = bytes.subarray(0, 12);
+      const encrypted = bytes.subarray(12);
+      const json = await decrypt(await getPasswordHash(password), [
+        iv,
+        encrypted,
+      ]);
+      data = JSON.parse(decode(gunzipSync(json)));
+    }
+    const existingNames = new Set(await this.list());
+    const report = { added: [], updated: [] };
+    const record = (name) => {
+      report[existingNames.has(name) ? "updated" : "added"].push(name);
+      existingNames.add(name);
+    };
+    if (isGoogleAuthenticatorExport(data)) {
+      const usedNames = new Set(existingNames);
+      for (const account of data.accounts) {
+        const url = urlFromGoogleAuthenticatorAccount(account);
+        const name = nameForImportedUrl(usedNames, url);
+        await this.set(name, url.toString());
+        record(name);
+      }
+      return report;
+    }
+    if (isOtpUrlListExport(data)) {
+      const usedNames = new Set(existingNames);
+      for (const url of data) {
+        const name = nameForImportedUrl(usedNames, url);
+        await this.set(name, new URL(url).toString());
+        record(name);
+      }
+      return report;
+    }
+    for (const [name, value] of Object.entries(data)) {
+      await this.set(name, value);
+      record(name);
+    }
+    return report;
   }
 }
 
@@ -464,6 +594,7 @@ export const fromBase32 = Object.assign(
     rx: /^[a-zA-Z2-7]+$/i,
     is: (s) =>
       typeof s === "string" && fromBase32.rx.test(s) && s.length % 8 === 0,
+    isSecret: (s) => typeof s === "string" && fromBase32.rx.test(s),
     random: (n) =>
       [...getRandomValues(new Uint8Array(16 * n))]
         .map((k) => fromBase32.alphabet[k & 31])
@@ -513,7 +644,7 @@ export const isOtpUrl = (url) => {
   if (type !== "totp" && type !== "hotp") {
     return false;
   }
-  if (!fromBase32.is(url.searchParams.get("secret") ?? "")) {
+  if (!fromBase32.isSecret(url.searchParams.get("secret") ?? "")) {
     return false;
   }
   if (url.searchParams.has("digits")) {
@@ -641,6 +772,10 @@ export const usage = async (level = 0, msg) => {
               ],
               ["`--update` / `-u`", "update from GitHub"],
               ["`--verbose` / `-v`", "say more"],
+              [
+                "`--unencrypted`",
+                "export in plain text †",
+              ],
             ]),
       ]),
       ...(short
@@ -650,6 +785,7 @@ export const usage = async (level = 0, msg) => {
             "- the default for a tty is clipboard, no stdout",
             "- the default for a pipe is stdout, no clipboard",
             "- to flip both at once, use `-cs`",
+            "- † `export` only; requires a tty, prompts to confirm",
           ]),
       "",
       `## Commands`,
@@ -660,6 +796,7 @@ export const usage = async (level = 0, msg) => {
         ["`add {name} {url\\|secret}`", "Add a named OTP"],
         ["`code {name\\|url\\|secret}`", "Generate a code"],
         ["`delete {name}`", "Delete a named OTP"],
+        ["`rename {currentName} {newName}`", "Rename a stored OTP"],
         ["`export {filename}`", "Export the store to an encrypted, gzipped file"],
         ["`import {filename}`", "Import OTPs from a file made with `export`"],
       ]),
@@ -788,6 +925,10 @@ export async function parseArgs(args) {
         commands.push(["delete", args[++i], undefined, flags]);
         flags = { ...flagsDefault() };
         break;
+      case "rename":
+        commands.push(["rename", args[++i], args[++i], flags]);
+        flags = { ...flagsDefault() };
+        break;
       case "export":
         commands.push(["export", args[++i], undefined, flags]);
         flags = { ...flagsDefault() };
@@ -801,6 +942,9 @@ export async function parseArgs(args) {
         break;
       case "--stdout":
         flags.stdio = !flags.stdio;
+        break;
+      case "--unencrypted":
+        flags.unencrypted = !flags.unencrypted;
         break;
       case "--help":
         await usage();
@@ -883,6 +1027,18 @@ export async function main(args, env) {
           await usage(1, `No code named ${name}`);
         }
         break;
+      case "rename":
+        store = new SecretManager("org.fordi.otp", env, flags);
+        try {
+          if (await store.rename(name, value)) {
+            if (flags.stdio) console.log(`Renamed ${name} to ${value}`);
+          } else {
+            await usage(1, `No code named ${name}`);
+          }
+        } catch (e) {
+          await usage(1, e.message);
+        }
+        break;
       case "list": {
         store = new SecretManager("org.fordi.otp", env, flags);
         const keys = await store.list();
@@ -912,13 +1068,39 @@ export async function main(args, env) {
       }
       case "export": {
         store = new SecretManager("org.fordi.otp", env, flags);
+        if (flags.unencrypted && !process.stdin.isTTY) {
+          await usage(
+            1,
+            "--unencrypted requires an interactive terminal to confirm",
+          );
+          break;
+        }
         let password;
-        if (process.stdin.isTTY) {
-          password = await prompt.password("Password: ");
-          const confirm = await prompt.password("Confirm password: ");
-          if (password !== confirm) {
-            await usage(1, "Passwords didn't match");
+        if (flags.unencrypted) {
+          const confirmed = await prompt.password(
+            "This will write your OTP secrets in PLAIN TEXT. Type 'yes' to continue: ",
+          );
+          if (confirmed.trim().toLowerCase() !== "yes") {
+            await usage(1, "Export cancelled");
             break;
+          }
+          password = undefined;
+        } else if (process.stdin.isTTY) {
+          password = await prompt.password("Password: ");
+          if (!password) {
+            const confirmed = await prompt.password(
+              "This will write your OTP secrets in PLAIN TEXT. Type 'yes' to continue: ",
+            );
+            if (confirmed.trim().toLowerCase() !== "yes") {
+              await usage(1, "Export cancelled");
+              break;
+            }
+          } else {
+            const confirm = await prompt.password("Confirm password: ");
+            if (password !== confirm) {
+              await usage(1, "Passwords didn't match");
+              break;
+            }
           }
         } else {
           password = await prompt.password("");
@@ -929,11 +1111,22 @@ export async function main(args, env) {
       }
       case "import": {
         store = new SecretManager("org.fordi.otp", env, flags);
-        const password = await prompt.password(
-          process.stdin.isTTY ? "Password: " : "",
-        );
-        await store.import(password, name);
-        if (flags.stdio) console.log(`Imported from ${name}`);
+        const getPassword = () =>
+          prompt.password(process.stdin.isTTY ? "Password: " : "");
+        const { added, updated } = await store.import(getPassword, name);
+        if (flags.stdio) {
+          console.log(`Imported from ${name}`);
+          for (const n of added) console.log(`  added: ${n}`);
+          for (const n of updated) console.log(`  updated: ${n}`);
+        } else if (added.length || updated.length) {
+          console.log(
+            markdownTable([
+              ["Name", "Status"],
+              ...added.map((n) => [n, "added"]),
+              ...updated.map((n) => [n, "updated"]),
+            ]),
+          );
+        }
         break;
       }
     }

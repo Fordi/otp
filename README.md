@@ -54,21 +54,24 @@ otp [([flags] command|{name|url|secret})]...
 | `--home` / `-H {home}` | use a home directory other than `~/.local` |
 | `--update` / `-u`      | update from GitHub                         |
 | `--verbose` / `-v`     | say more                                   |
+| `--unencrypted`        | export in plain text †                     |
 
 - the default for a tty is clipboard, no stdout
 - the default for a pipe is stdout, no clipboard
 - to flip both at once, use `-cs`
+- † `export` only; requires a tty, prompts to confirm
 
 ## Commands
 
-| Command                    | Description                                    |
-| -------------------------- | ---------------------------------------------- |
-| `list`                     | List the OTPs in your store (the default)      |
-| `add {name} {url\|secret}` | Add a named OTP                                |
-| `code {name\|url\|secret}` | Generate a code                                |
-| `delete {name}`            | Delete a named OTP                             |
-| `export {filename}`        | Export the store to an encrypted, gzipped file |
-| `import {filename}`        | Import OTPs from a file made with `export`     |
+| Command                          | Description                                    |
+| -------------------------------- | ---------------------------------------------- |
+| `list`                           | List the OTPs in your store (the default)      |
+| `add {name} {url\|secret}`       | Add a named OTP                                |
+| `code {name\|url\|secret}`       | Generate a code                                |
+| `delete {name}`                  | Delete a named OTP                             |
+| `rename {currentName} {newName}` | Rename a stored OTP                            |
+| `export {filename}`              | Export the store to an encrypted, gzipped file |
+| `import {filename}`              | Import OTPs from a file made with `export`     |
 
 - `import` and `export` prompt for a password unless one is piped in.
 
@@ -89,13 +92,13 @@ $ # None of these are real secrets
 $ otp add npm otpauth://totp/npm:coolfellow?secret=ABCDEFGHIJKLMNOPQRSTUVWXYZ234567&issuer=npm
 $ otp code npm # code for npm is now on your clipboard
 $ otp code -cs npm # or just `otp -cs npm`
-028090
+337142
 $ otp list # or just `otp`
 | Name   | Type | Issuer | Account    |
 | ------ | ---- | ------ | ---------- |
 | npm    | totp | npm    | coolfellow |
 | github | totp | GitHub | jiveguy    |
 $ otp -cs code 234567ABCDEFGHIJ # or otp -cs 234567ABCDEFGHIJ
-038331
+510190
 $ npm publish --access=public --otp=$(otp npm) # command-line publish without the fuss
 ```
